@@ -30,7 +30,10 @@ TableWriter::TableWriter(
           tableWriteNode->outputType(),
           operatorId,
           tableWriteNode->id(),
-          "TableWrite"),
+          "TableWrite",
+          tableWriteNode->canSpill(driverCtx->queryConfig())
+              ? driverCtx->makeSpillConfig(operatorId)
+              : std::nullopt),
       driverCtx_(driverCtx),
       connectorPool_(driverCtx_->task->addConnectorPoolLocked(
           planNodeId(),
@@ -55,7 +58,10 @@ TableWriter::TableWriter(
   const auto& connectorId = tableWriteNode->insertTableHandle()->connectorId();
   connector_ = connector::getConnector(connectorId);
   connectorQueryCtx_ = operatorCtx_->createConnectorQueryCtx(
-      connectorId, planNodeId(), connectorPool_);
+      connectorId,
+      planNodeId(),
+      connectorPool_,
+      spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr);
 
   auto names = tableWriteNode->columnNames();
   auto types = tableWriteNode->columns()->children();
@@ -82,6 +88,22 @@ void TableWriter::createDataSink() {
       insertTableHandle_,
       connectorQueryCtx_.get(),
       commitStrategy_);
+}
+
+void TableWriter::abortDataSink() {
+  VELOX_CHECK(!closed_);
+  closed_ = true;
+  if (dataSink_ != nullptr) {
+    dataSink_->close(false);
+  }
+}
+
+std::vector<std::string> TableWriter::closeDataSink() {
+  // We only expect closeDataSink called once.
+  VELOX_CHECK(!closed_);
+  VELOX_CHECK_NOT_NULL(dataSink_);
+  closed_ = true;
+  return dataSink_->close(true);
 }
 
 void TableWriter::addInput(RowVectorPtr input) {
@@ -112,6 +134,13 @@ void TableWriter::addInput(RowVectorPtr input) {
   }
 }
 
+void TableWriter::noMoreInput() {
+  Operator::noMoreInput();
+  if (aggregation_ != nullptr) {
+    aggregation_->noMoreInput();
+  }
+}
+
 RowVectorPtr TableWriter::getOutput() {
   // Making sure the output is read only once after the write is fully done.
   if (!noMoreInput_ || finished_) {
@@ -129,6 +158,7 @@ RowVectorPtr TableWriter::getOutput() {
 
   finished_ = true;
   updateWrittenBytes();
+  const std::vector<std::string> fragments = closeDataSink();
 
   if (outputType_->size() == 1) {
     // NOTE: this is for non-prestissimo use cases.
@@ -140,8 +170,6 @@ RowVectorPtr TableWriter::getOutput() {
         std::vector<VectorPtr>{std::make_shared<ConstantVector<int64_t>>(
             pool(), 1, false /*isNull*/, BIGINT(), numWrittenRows_)});
   }
-
-  const std::vector<std::string> fragments = dataSink_->finish();
 
   vector_size_t numOutputRows = fragments.size() + 1;
 
@@ -208,6 +236,17 @@ void TableWriter::updateWrittenBytes() {
   const auto writtenBytes = dataSink_->getCompletedBytes();
   auto lockedStats = stats_.wlock();
   lockedStats->physicalWrittenBytes = writtenBytes;
+}
+
+void TableWriter::close() {
+  if (!closed_) {
+    // Abort the data sink if the query has already failed and no need for
+    // regular close.
+    abortDataSink();
+  }
+  if (aggregation_ != nullptr) {
+    aggregation_->close();
+  }
 }
 
 // static

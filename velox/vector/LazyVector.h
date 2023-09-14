@@ -111,8 +111,6 @@ class VectorLoader {
 // top-level vector.
 class LazyVector : public BaseVector {
  public:
-  static constexpr const char* kCpuNanos = "dataSourceLazyCpuNanos";
-  static constexpr const char* kWallNanos = "dataSourceLazyWallNanos";
   LazyVector(
       velox::memory::MemoryPool* pool,
       TypePtr type,
@@ -236,6 +234,10 @@ class LazyVector : public BaseVector {
 
   bool isNullAt(vector_size_t index) const override {
     return loadedVector()->isNullAt(index);
+  }
+
+  bool containsNullAt(vector_size_t index) const override {
+    return loadedVector()->containsNullAt(index);
   }
 
   uint64_t retainedSize() const override {

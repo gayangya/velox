@@ -152,6 +152,8 @@ class MemoryArbitrator {
   struct Stats {
     /// The number of arbitration requests.
     uint64_t numRequests{0};
+    /// The number of succeeded arbitration requests.
+    uint64_t numSucceeded{0};
     /// The number of aborted arbitration requests.
     uint64_t numAborted{0};
     /// The number of arbitration request failures.
@@ -169,9 +171,13 @@ class MemoryArbitrator {
     uint64_t maxCapacityBytes{0};
     /// The free memory capacity in bytes.
     uint64_t freeCapacityBytes{0};
+    /// The sum of all reclaim operation durations during arbitration in
+    /// microseconds.
+    uint64_t reclaimTimeUs{0};
 
     Stats(
         uint64_t _numRequests,
+        uint64_t _numSucceeded,
         uint64_t _numAborted,
         uint64_t _numFailures,
         uint64_t _queueTimeUs,
@@ -179,7 +185,8 @@ class MemoryArbitrator {
         uint64_t _numShrunkBytes,
         uint64_t _numReclaimedBytes,
         uint64_t _maxCapacityBytes,
-        uint64_t _freeCapacityBytes);
+        uint64_t _freeCapacityBytes,
+        uint64_t _reclaimTimeUs);
 
     Stats() = default;
 

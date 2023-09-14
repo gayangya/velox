@@ -491,6 +491,8 @@ class Type : public Tree<const std::shared_ptr<const Type>>,
   // todo(youknowjack): avoid expensive virtual function calls for these
   // simple functions
   virtual size_t cppSizeInBytes() const {
+    // Must be a std::invalid_argument instead of VeloxException in order to
+    // generate python ValueError in python bindings.
     throw std::invalid_argument{"Not a fixed width type: " + toString()};
   }
 

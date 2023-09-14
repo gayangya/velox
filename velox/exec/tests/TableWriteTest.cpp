@@ -16,6 +16,7 @@
 #include "folly/dynamic.h"
 #include "velox/common/base/Fs.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/testutil/TestValue.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/HivePartitionFunction.h"
 #include "velox/dwio/common/WriterFactory.h"
@@ -37,6 +38,7 @@ using namespace facebook::velox::exec::test;
 using namespace facebook::velox::connector;
 using namespace facebook::velox::connector::hive;
 using namespace facebook::velox::dwio::common;
+using namespace facebook::velox::common::testutil;
 
 enum class TestMode {
   kUnpartitioned,
@@ -182,6 +184,8 @@ class TableWriteTest : public HiveConnectorTestBase {
                 "c4", core::SortOrder{true, true}),
             std::make_shared<const HiveSortingColumn>(
                 "c1", core::SortOrder{false, false})};
+        sortColumnIndices_ = {4, 1};
+        sortedFlags_ = {{true, true}, {false, false}};
       }
       bucketProperty_ = std::make_shared<HiveBucketProperty>(
           testParam_.bucketKind(), 4, bucketedBy, bucketedTypes, sortedBy);
@@ -786,6 +790,29 @@ class TableWriteTest : public HiveConnectorTestBase {
     for (const auto bucketId : bucketIds) {
       ASSERT_EQ(expectedBucketId, bucketId);
     }
+
+    if (!testParam_.bucketSort()) {
+      return;
+    }
+    // Verifies the sorting behavior
+    for (int i = 0; i < resultVector->size() - 1; ++i) {
+      for (int j = 0; j < sortColumnIndices_.size(); ++j) {
+        auto compareResult =
+            resultVector->childAt(sortColumnIndices_.at(j))
+                ->compare(
+                    resultVector->childAt(sortColumnIndices_.at(j))
+                        ->wrappedVector(),
+                    i,
+                    i + 1,
+                    sortedFlags_[j]);
+        if (compareResult.has_value()) {
+          if (compareResult.value() < 0) {
+            break;
+          }
+          ASSERT_EQ(compareResult.value(), 0);
+        }
+      }
+    }
   }
 
   // Verifies the file layout and data produced by a table writer.
@@ -879,6 +906,8 @@ class TableWriteTest : public HiveConnectorTestBase {
   std::vector<TypePtr> partitionTypes_;
   std::vector<column_index_t> partitionChannels_;
   std::vector<uint32_t> numPartitionKeyValues_;
+  std::vector<column_index_t> sortColumnIndices_;
+  std::vector<CompareFlags> sortedFlags_;
   std::shared_ptr<HiveBucketProperty> bucketProperty_{nullptr};
   core::PlanNodeId tableWriteNodeId_;
 };
@@ -1020,9 +1049,27 @@ class BucketedTableOnlyWriteTest
         testParams.push_back(TestParam{
             fileFormat,
             TestMode::kBucketed,
+            CommitStrategy::kNoCommit,
+            HiveBucketProperty::Kind::kHiveCompatible,
+            true,
+            multiDrivers,
+            CompressionKind_ZSTD}
+                                 .value);
+        testParams.push_back(TestParam{
+            fileFormat,
+            TestMode::kBucketed,
             CommitStrategy::kTaskCommit,
             HiveBucketProperty::Kind::kHiveCompatible,
             false,
+            multiDrivers,
+            CompressionKind_ZSTD}
+                                 .value);
+        testParams.push_back(TestParam{
+            fileFormat,
+            TestMode::kBucketed,
+            CommitStrategy::kTaskCommit,
+            HiveBucketProperty::Kind::kHiveCompatible,
+            true,
             multiDrivers,
             CompressionKind_ZSTD}
                                  .value);
@@ -1038,9 +1085,27 @@ class BucketedTableOnlyWriteTest
         testParams.push_back(TestParam{
             fileFormat,
             TestMode::kBucketed,
+            CommitStrategy::kNoCommit,
+            HiveBucketProperty::Kind::kPrestoNative,
+            true,
+            multiDrivers,
+            CompressionKind_ZSTD}
+                                 .value);
+        testParams.push_back(TestParam{
+            fileFormat,
+            TestMode::kBucketed,
             CommitStrategy::kTaskCommit,
             HiveBucketProperty::Kind::kPrestoNative,
             false,
+            multiDrivers,
+            CompressionKind_ZSTD}
+                                 .value);
+        testParams.push_back(TestParam{
+            fileFormat,
+            TestMode::kBucketed,
+            CommitStrategy::kNoCommit,
+            HiveBucketProperty::Kind::kPrestoNative,
+            true,
             multiDrivers,
             CompressionKind_ZSTD}
                                  .value);
@@ -2455,6 +2520,68 @@ TEST_P(AllTableWriterTest, tableWrittenBytes) {
       ASSERT_GT(operatorStats.at(i).physicalWrittenBytes, 0);
     }
   }
+}
+
+DEBUG_ONLY_TEST_P(
+    UnpartitionedTableWriterTest,
+    fileWriterFlushErrorOnDriverClose) {
+  VectorFuzzer::Options options;
+  const int batchSize = 1000;
+  options.vectorSize = batchSize;
+  VectorFuzzer fuzzer(options, pool());
+  const int numBatches = 10;
+  std::vector<RowVectorPtr> vectors;
+  int numRows{0};
+  for (int i = 0; i < numBatches; ++i) {
+    numRows += batchSize;
+    vectors.push_back(fuzzer.fuzzRow(rowType_));
+  }
+  std::atomic<int> writeInputs{0};
+  std::atomic<bool> triggerWriterOOM{false};
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::Driver::runInternal::addInput",
+      std::function<void(Operator*)>([&](Operator* op) {
+        if (op->operatorType() != "TableWrite") {
+          return;
+        }
+        if (++writeInputs != 3) {
+          return;
+        }
+        op->testingOperatorCtx()->task()->requestAbort();
+        triggerWriterOOM = true;
+      }));
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::memory::MemoryPoolImpl::reserveThreadSafe",
+      std::function<void(memory::MemoryPool*)>([&](memory::MemoryPool* pool) {
+        const std::string dictPoolRe(".*dictionary");
+        const std::string generalPoolRe(".*general");
+        const std::string compressionPoolRe(".*compression");
+        if (!RE2::FullMatch(pool->name(), dictPoolRe) &&
+            !RE2::FullMatch(pool->name(), generalPoolRe) &&
+            !RE2::FullMatch(pool->name(), compressionPoolRe)) {
+          return;
+        }
+        if (!triggerWriterOOM) {
+          return;
+        }
+        VELOX_MEM_POOL_CAP_EXCEEDED("Inject write OOM");
+      }));
+
+  auto outputDirectory = TempDirectoryPath::create();
+  auto op = createInsertPlan(
+      PlanBuilder().values(vectors),
+      rowType_,
+      outputDirectory->path,
+      partitionedBy_,
+      bucketProperty_,
+      compressionKind_,
+      getNumWriters(),
+      connector::hive::LocationHandle::TableType::kNew,
+      commitStrategy_);
+
+  VELOX_ASSERT_THROW(
+      assertQuery(op, fmt::format("SELECT {}", numRows)),
+      "Aborted for external error");
 }
 
 VELOX_INSTANTIATE_TEST_SUITE_P(

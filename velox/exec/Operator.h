@@ -124,8 +124,6 @@ struct OperatorStats {
 
   CpuWallTiming finishTiming;
 
-  CpuWallTiming backgroundTiming;
-
   MemoryStats memoryStats;
 
   // Total bytes in memory for spilling
@@ -142,10 +140,6 @@ struct OperatorStats {
 
   // Total current spilled files.
   uint32_t spilledFiles{0};
-
-  // Last recorded values for lazy loading times for loads triggered by 'this'.
-  int64_t lastLazyCpuNanos{0};
-  int64_t lastLazyWallNanos{0};
 
   std::unordered_map<std::string, RuntimeMetric> runtimeStats;
 
@@ -231,7 +225,8 @@ class OperatorCtx {
   std::shared_ptr<connector::ConnectorQueryCtx> createConnectorQueryCtx(
       const std::string& connectorId,
       const std::string& planNodeId,
-      memory::MemoryPool* connectorPool) const;
+      memory::MemoryPool* connectorPool,
+      const common::SpillConfig* spillConfig = nullptr) const;
 
  private:
   DriverCtx* const driverCtx_;
@@ -308,7 +303,7 @@ class Operator : public BaseRuntimeStatWriter {
       int32_t operatorId,
       std::string planNodeId,
       std::string operatorType,
-      std::optional<Spiller::Config> spillConfig = std::nullopt);
+      std::optional<common::SpillConfig> spillConfig = std::nullopt);
 
   virtual ~Operator() = default;
 
@@ -406,15 +401,6 @@ class Operator : public BaseRuntimeStatWriter {
   virtual void close() {
     input_ = nullptr;
     results_.clear();
-
-    // We are collecting the background CPU time of this operator and storing
-    // its value in OperatorStats.backgroundTiming.
-    const uint64_t backgroundCpuTimeMs = this->backgroundCpuTimeMs();
-    if (backgroundCpuTimeMs > 0) {
-      const CpuWallTiming opBackgroundTiming{1, 0, backgroundCpuTimeMs};
-      stats_.wlock()->backgroundTiming.add(opBackgroundTiming);
-    }
-
     // Release the unused memory reservation on close.
     operatorCtx_->pool()->release();
   }
@@ -452,13 +438,6 @@ class Operator : public BaseRuntimeStatWriter {
   /// read/write access to the stats.
   folly::Synchronized<OperatorStats>& stats() {
     return stats_;
-  }
-
-  // Returns the cpu time (ms) spent by this operator on background activities
-  // which are not running on driver threads. Individual operators will override
-  // this method to report their background CPU time.
-  virtual uint64_t backgroundCpuTimeMs() const {
-    return 0L;
   }
 
   void recordBlockingTime(uint64_t start, BlockingReason reason);
@@ -646,7 +625,7 @@ class Operator : public BaseRuntimeStatWriter {
   const RowTypePtr outputType_;
   /// Contains the disk spilling related configs if spilling is enabled (e.g.
   /// the fs dir path to store spill files), otherwise null.
-  const std::optional<Spiller::Config> spillConfig_;
+  const std::optional<common::SpillConfig> spillConfig_;
 
   bool initialized_{false};
 
