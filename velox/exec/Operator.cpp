@@ -50,10 +50,12 @@ OperatorCtx::createConnectorQueryCtx(
     const std::string& connectorId,
     const std::string& planNodeId,
     memory::MemoryPool* connectorPool,
+    memory::SetMemoryReclaimer setMemoryReclaimer,
     const common::SpillConfig* spillConfig) const {
   return std::make_shared<connector::ConnectorQueryCtx>(
       pool_,
       connectorPool,
+      std::move(setMemoryReclaimer),
       driverCtx_->task->queryCtx()->getConnectorConfig(connectorId),
       spillConfig,
       std::make_unique<SimpleExpressionEvaluator>(
@@ -436,6 +438,8 @@ void OperatorStats::add(const OperatorStats& other) {
 
   finishTiming.add(other.finishTiming);
 
+  backgroundTiming.add(other.backgroundTiming);
+
   memoryStats.add(other.memoryStats);
 
   for (const auto& [name, stats] : other.runtimeStats) {
@@ -472,6 +476,8 @@ void OperatorStats::clear() {
   blockedWallNanos = 0;
 
   finishTiming.clear();
+
+  backgroundTiming.clear();
 
   memoryStats.clear();
 

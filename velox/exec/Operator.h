@@ -124,6 +124,11 @@ struct OperatorStats {
 
   CpuWallTiming finishTiming;
 
+  // CPU time spent on background activities (activities that are not
+  // running on driver threads). Operators are responsible to report background
+  // CPU time at a reasonable time granularity.
+  CpuWallTiming backgroundTiming;
+
   MemoryStats memoryStats;
 
   // Total bytes in memory for spilling
@@ -140,6 +145,10 @@ struct OperatorStats {
 
   // Total current spilled files.
   uint32_t spilledFiles{0};
+
+  // Last recorded values for lazy loading times for loads triggered by 'this'.
+  int64_t lastLazyCpuNanos{0};
+  int64_t lastLazyWallNanos{0};
 
   std::unordered_map<std::string, RuntimeMetric> runtimeStats;
 
@@ -226,6 +235,7 @@ class OperatorCtx {
       const std::string& connectorId,
       const std::string& planNodeId,
       memory::MemoryPool* connectorPool,
+      memory::SetMemoryReclaimer setMemoryReclaimer = nullptr,
       const common::SpillConfig* spillConfig = nullptr) const;
 
  private:
@@ -554,12 +564,13 @@ class Operator : public BaseRuntimeStatWriter {
     void abort(memory::MemoryPool* pool, const std::exception_ptr& /* error */)
         override;
 
-   private:
+   protected:
     MemoryReclaimer(const std::shared_ptr<Driver>& driver, Operator* op)
         : driver_(driver), op_(op) {
       VELOX_CHECK_NOT_NULL(op_);
     }
 
+   private:
     // Gets the shared pointer to the associated driver to ensure the liveness
     // of the operator during the memory reclaim operation.
     //
