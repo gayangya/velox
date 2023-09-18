@@ -15,9 +15,16 @@
 # for generated headers
 
 if(VELOX_ENABLE_ABFS)
-  add_library(velox_abfs AbfsReadFile.cpp AbfsFileSystem.cpp AbfsReadFile.h
-                         AbfsFileSystem.h AbfsUtil.h)
-  target_link_libraries(velox_abfs Azure::azure-storage-blobs)
+  add_library(
+    velox_abfs
+    AbfsReadFile.cpp
+    AbfsWriteFile.cpp
+    AbfsFileSystem.cpp
+    AbfsReadFile.h
+    AbfsWriteFile.h
+    AbfsFileSystem.h
+    AbfsUtil.h)
+  target_link_libraries(velox_abfs Azure::azure-storage-files-datalake)
 
   if(${VELOX_BUILD_TESTING})
     add_subdirectory(tests)

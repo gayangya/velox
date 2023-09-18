@@ -42,8 +42,8 @@ static const std::string AzuriteConnectionString = fmt::format(
     AzuriteAccountName);
 static const std::string AzuriteABFSEndpoint = fmt::format(
     "abfs://{}@{}.dfs.core.windows.net/",
-    AzuriteAccountName,
-    AzuriteContainerName);
+    AzuriteContainerName,
+    AzuriteAccountName);
 
 static const std::vector<std::string> CommandOptions = {
     "--silent",

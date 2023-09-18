@@ -15,9 +15,13 @@
  */
 
 #include "connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#include <azure/storage/files/datalake.hpp>
+#include <gmock/gmock.h>
 #include "connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
+#include "connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
 #include "connectors/hive/storage_adapters/abfs/tests/AzuriteServer.h"
 #include "gtest/gtest.h"
+#include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/File.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/connectors/hive/FileHandle.h"
@@ -25,14 +29,66 @@
 #include "velox/exec/tests/utils/TempFilePath.h"
 
 #include <atomic>
+#include <filesystem>
 #include <random>
 
 using namespace facebook::velox;
+using namespace Azure::Storage::Files::DataLake;
 
 constexpr int kOneMB = 1 << 20;
 static const std::string filePath = "test_file.txt";
 static const std::string fullFilePath =
     facebook::velox::filesystems::test::AzuriteABFSEndpoint + filePath;
+
+static const std::string localTempFileDBPath = "/tmp/velox_abfs_test_gpw3VL";
+
+class MockDataLakeFileClientImpl
+    : public facebook::velox::filesystems::abfs::IFileClient {
+ public:
+  void Create() override {
+    fileStream_ = std::ofstream(
+        filePath_,
+        std::ios_base::out | std::ios_base::binary | std::ios_base::app);
+  }
+
+  bool Exist() override {
+    return std::filesystem::exists(filePath_);
+  }
+
+  void Append(const uint8_t* buffer, size_t size, uint64_t offset) override {
+    fileStream_.seekp(offset);
+    fileStream_.write(reinterpret_cast<const char*>(buffer), size);
+  }
+
+  void Flush(uint64_t position) override {
+    fileStream_.flush();
+  }
+
+  uint64_t Size() override {
+    std::ifstream file(filePath_, std::ios::binary | std::ios::ate);
+    return static_cast<uint64_t>(file.tellg());
+  }
+
+  void Close() override {
+    fileStream_.flush();
+    fileStream_.close();
+  }
+
+ private:
+  std::string filePath_ = localTempFileDBPath;
+  std::ofstream fileStream_;
+};
+
+std::unique_ptr<WriteFile> openFileForWrite(std::string_view path) {
+  auto abfsfile =
+      std::make_unique<facebook::velox::filesystems::abfs::AbfsWriteFile>(
+          std::string(path),
+          facebook::velox::filesystems::test::AzuriteConnectionString);
+  abfsfile->setFileClient(std::make_unique<MockDataLakeFileClientImpl>(
+      MockDataLakeFileClientImpl()));
+  abfsfile->initialize();
+  return abfsfile;
+}
 
 class AbfsFileSystemTest : public testing::Test {
  public:
@@ -72,6 +128,10 @@ class AbfsFileSystemTest : public testing::Test {
               filesystems::abfs::AbfsFileSystem::kReadAbfsConnectionStr, ""));
     }
     filesystems::abfs::registerAbfsFileSystem();
+
+    if (std::filesystem::exists(localTempFileDBPath)) {
+      std::filesystem::remove(localTempFileDBPath);
+    }
   }
 
   static void TearDownTestSuite() {
@@ -80,15 +140,42 @@ class AbfsFileSystemTest : public testing::Test {
     }
   }
 
+  static std::string generateRandomData(int size) {
+    static const char charset[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    std::string data(size, ' ');
+
+    for (int i = 0; i < size; ++i) {
+      int index = rand() % (sizeof(charset) - 1);
+      data[i] = charset[index];
+    }
+
+    return data;
+  }
+
   static std::atomic<bool> startThreads;
 
  private:
-  static std::shared_ptr<::exec::test::TempFilePath> createFile() {
+  static std::shared_ptr<::exec::test::TempFilePath> createFile(
+      uint64_t size = -1) {
     auto tempFile = ::exec::test::TempFilePath::create();
-    tempFile->append("aaaaa");
-    tempFile->append("bbbbb");
-    tempFile->append(std::string(kOneMB, 'c'));
-    tempFile->append("ddddd");
+    if (size == -1) {
+      tempFile->append("aaaaa");
+      tempFile->append("bbbbb");
+      tempFile->append(std::string(kOneMB, 'c'));
+      tempFile->append("ddddd");
+    } else {
+      const uint64_t totalSize = size * 1024 * 1024;
+      const uint64_t chunkSize = 5 * 1024 * 1024;
+      uint64_t remainingSize = totalSize;
+      while (remainingSize > 0) {
+        uint64_t dataSize = std::min(remainingSize, chunkSize);
+        std::string randomData = generateRandomData(dataSize);
+        tempFile->append(randomData);
+        remainingSize -= dataSize;
+      }
+    }
     return tempFile;
   }
 
@@ -172,15 +259,40 @@ TEST_F(AbfsFileSystemTest, missingFile) {
   }
 }
 
-TEST_F(AbfsFileSystemTest, openFileForWriteNotImplemented) {
+TEST_F(AbfsFileSystemTest, OpenFileForWriteTest) {
   auto hiveConfig = AbfsFileSystemTest::hiveConfig();
   auto abfs = filesystems::getFileSystem(fullFilePath, hiveConfig);
-  try {
-    abfs->openFileForWrite(fullFilePath);
-    FAIL() << "Expected VeloxException";
-  } catch (VeloxException const& err) {
-    EXPECT_EQ(err.message(), std::string("write for abfs not implemented"));
-  }
+  const std::string abfsFile =
+      facebook::velox::filesystems::test::AzuriteABFSEndpoint + "writetest.txt";
+  auto abfsWriteFile = openFileForWrite(abfsFile);
+  EXPECT_EQ(abfsWriteFile->size(), 0);
+  uint64_t totalSize = 0;
+  std::string randomData =
+      AbfsFileSystemTest::generateRandomData(1 * 1024 * 1024);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->append(randomData);
+  totalSize = randomData.size() * 8;
+  abfsWriteFile->flush();
+  EXPECT_EQ(abfsWriteFile->size(), totalSize);
+
+  randomData = AbfsFileSystemTest::generateRandomData(9 * 1024 * 1024);
+  abfsWriteFile->append(randomData);
+  totalSize += randomData.size();
+  randomData = AbfsFileSystemTest::generateRandomData(2 * 1024 * 1024);
+  totalSize += randomData.size();
+  abfsWriteFile->append(randomData);
+  abfsWriteFile->flush();
+  EXPECT_EQ(abfsWriteFile->size(), totalSize);
+  abfsWriteFile->flush();
+  abfsWriteFile->close();
+  VELOX_ASSERT_THROW(abfsWriteFile->append("abc"), "File is not open");
+  VELOX_ASSERT_THROW(openFileForWrite(abfsFile), "File already exists");
 }
 
 TEST_F(AbfsFileSystemTest, renameNotImplemented) {

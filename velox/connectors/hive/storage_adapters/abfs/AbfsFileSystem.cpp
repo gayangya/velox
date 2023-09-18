@@ -16,6 +16,7 @@
 #include "AbfsFileSystem.h"
 #include "AbfsReadFile.h"
 #include "AbfsUtil.h"
+#include "AbfsWriteFile.h"
 #include "velox/common/file/File.h"
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/core/Config.h"
@@ -121,6 +122,15 @@ std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
       impl_->connectionString(std::string(path)),
       impl_->getLoadQuantum(),
       impl_->getIOExecutor());
+  abfsfile->initialize();
+  return abfsfile;
+}
+
+std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
+    std::string_view path,
+    const FileOptions& /*unused*/) {
+  auto abfsfile = std::make_unique<AbfsWriteFile>(
+      std::string(path), impl_->connectionString(std::string(path)));
   abfsfile->initialize();
   return abfsfile;
 }
