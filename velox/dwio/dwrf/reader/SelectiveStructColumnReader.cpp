@@ -25,13 +25,13 @@ using namespace dwio::common;
 
 SelectiveStructColumnReader::SelectiveStructColumnReader(
     const std::shared_ptr<const TypeWithId>& requestedType,
-    const std::shared_ptr<const TypeWithId>& dataType,
+    const std::shared_ptr<const TypeWithId>& fileType,
     DwrfParams& params,
     common::ScanSpec& scanSpec,
     bool isRoot)
     : SelectiveStructColumnReaderBase(
           requestedType,
-          dataType,
+          fileType,
           params,
           scanSpec,
           isRoot) {
@@ -54,20 +54,21 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
       childSpec->setSubscript(kConstantChildSpecSubscript);
       continue;
     }
-    auto childDataType = fileType_->childByName(childSpec->fieldName());
+    auto childFileType = fileType_->childByName(childSpec->fieldName());
     auto childRequestedType =
         requestedType_->childByName(childSpec->fieldName());
     auto labels = params.streamLabels().append(folly::to<std::string>(i));
     auto childParams = DwrfParams(
         stripe,
         labels,
+        params.runtimeStatistics(),
         FlatMapContext{
             .sequence = encodingKey.sequence(),
             .inMapDecoder = nullptr,
             .keySelectionCallback = nullptr});
     VELOX_CHECK(cs.shouldReadNode(childRequestedType->id()));
     addChild(SelectiveDwrfReader::build(
-        childRequestedType, childDataType, childParams, *childSpec));
+        childRequestedType, childFileType, childParams, *childSpec));
     childSpec->setSubscript(children_.size() - 1);
   }
 }

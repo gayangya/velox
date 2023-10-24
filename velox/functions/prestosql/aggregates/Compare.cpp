@@ -38,5 +38,4 @@ int32_t compare(
           mapTypeKindToName(decoded.base()->typeKind())));
   return result.value();
 }
-
 } // namespace facebook::velox::aggregate::prestosql

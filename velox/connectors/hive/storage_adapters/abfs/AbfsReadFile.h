@@ -14,23 +14,15 @@
  * limitations under the License.
  */
 
-#include <azure/storage/blobs.hpp>
 #include <folly/executors/ThreadedExecutor.h>
 #include <folly/futures/Future.h>
 #include "velox/common/file/File.h"
+#include "velox/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 
 namespace facebook::velox::filesystems::abfs {
-using namespace Azure::Storage::Blobs;
 class AbfsReadFile final : public ReadFile {
  public:
-  constexpr static uint64_t kNaturalReadSize = 4 << 20; // 4M
-  constexpr static uint64_t kReadConcurrency = 8;
-
-  explicit AbfsReadFile(
-      const std::string& path,
-      const std::string& connectStr,
-      const int32_t loadQuantum,
-      const std::shared_ptr<folly::Executor> ioExecutor);
+  explicit AbfsReadFile(const std::string& path, const std::string& connectStr);
 
   void initialize();
 
@@ -57,26 +49,8 @@ class AbfsReadFile final : public ReadFile {
 
   uint64_t getNaturalReadSize() const final;
 
-  static uint64_t calculateSplitQuantum(
-      const uint64_t length,
-      const uint64_t loadQuantum);
-
-  static void splitRegion(
-      const uint64_t length,
-      const uint64_t loadQuantum,
-      std::vector<std::tuple<uint64_t, uint64_t>>& range);
-
- private:
-  void preadInternal(uint64_t offset, uint64_t length, char* pos) const;
-
-  const std::string path_;
-  const std::string connectStr_;
-  const int32_t loadQuantum_;
-  const std::shared_ptr<folly::Executor> ioExecutor_;
-  std::string fileSystem_;
-  std::string fileName_;
-  std::unique_ptr<BlobClient> fileClient_;
-
-  int64_t length_ = -1;
+ protected:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 } // namespace facebook::velox::filesystems::abfs

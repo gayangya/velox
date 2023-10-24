@@ -14,17 +14,21 @@
 
 # for generated headers
 
+add_library(velox_abfs RegisterAbfsFileSystem.cpp)
+
 if(VELOX_ENABLE_ABFS)
-  add_library(
+  target_sources(velox_abfs PRIVATE AbfsFileSystem.cpp AbfsUtils.cpp)
+  target_link_libraries(
     velox_abfs
-    AbfsReadFile.cpp
-    AbfsWriteFile.cpp
-    AbfsFileSystem.cpp
-    AbfsReadFile.h
-    AbfsWriteFile.h
-    AbfsFileSystem.h
-    AbfsUtil.h)
-  target_link_libraries(velox_abfs Azure::azure-storage-files-datalake)
+    PUBLIC velox_file
+           velox_core
+           velox_hive_connector
+           velox_dwio_common_exception
+           Azure::azure-storage-blobs
+           Azure::azure-storage-files-datalake
+           Folly::folly
+           glog::glog
+           fmt::fmt)
 
   if(${VELOX_BUILD_TESTING})
     add_subdirectory(tests)

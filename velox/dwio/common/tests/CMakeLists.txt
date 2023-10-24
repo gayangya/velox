@@ -22,10 +22,12 @@ add_executable(
   ColumnSelectorTests.cpp
   DataBufferTests.cpp
   DecoderUtilTest.cpp
+  ExecutorBarrierTest.cpp
   LocalFileSinkTest.cpp
   LoggedExceptionTest.cpp
   RangeTests.cpp
   ReadFileInputStreamTests.cpp
+  ReaderTest.cpp
   RetryTests.cpp
   TestBufferedInput.cpp
   TypeTests.cpp)
@@ -34,6 +36,7 @@ target_link_libraries(
   velox_dwio_common_test
   velox_dwio_common_test_utils
   velox_temp_path
+  velox_vector_test_lib
   Boost::regex
   velox_link_libs
   Folly::folly

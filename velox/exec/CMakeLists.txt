@@ -53,8 +53,8 @@ add_library(
   OperatorUtils.cpp
   OrderBy.cpp
   PartitionedOutput.cpp
-  PartitionedOutputBuffer.cpp
-  PartitionedOutputBufferManager.cpp
+  OutputBuffer.cpp
+  OutputBufferManager.cpp
   PlanNodeStats.cpp
   ProbeOperatorState.cpp
   RowContainer.cpp
@@ -66,6 +66,7 @@ add_library(
   SpillOperatorGroup.cpp
   Spiller.cpp
   StreamingAggregation.cpp
+  StreamingWindowBuild.cpp
   Strings.cpp
   TableScan.cpp
   TableWriteMerge.cpp

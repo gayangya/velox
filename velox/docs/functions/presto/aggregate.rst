@@ -17,11 +17,11 @@ depending on the order of input values.
 General Aggregate Functions
 ---------------------------
 
-.. function:: arbitrary(x) -> [same as input]
+.. function:: arbitrary(x) -> [same as x]
 
     Returns an arbitrary non-null value of ``x``, if one exists.
 
-.. function:: array_agg(x) -> array<[same as input]>
+.. function:: array_agg(x) -> array<[same as x]>
 
     Returns an array created from the input ``x`` elements. Ignores null
     inputs if :doc:`presto.array_agg.ignore_nulls <../../configs>` is set
@@ -82,17 +82,18 @@ General Aggregate Functions
     each input value occurs. Supports integral, floating-point,
     boolean, timestamp, and date input types.
 
-.. function:: geometric_mean(x) -> double
+.. function:: geometric_mean(bigint) -> double
+              geometric_mean(double) -> double
+              geometric_mean(real) -> real
 
     Returns the `geometric mean <https://en.wikipedia.org/wiki/Geometric_mean>`_ of all input values.
-
-    Supported types are BIGINT and DOUBLE.
 
 .. function:: max_by(x, y) -> [same as x]
 
     Returns the value of ``x`` associated with the maximum value of ``y`` over all input values.
 
 .. function:: max_by(x, y, n) -> array([same as x])
+    :noindex:
 
     Returns n values of ``x`` associated with the n largest values of ``y`` in descending order of ``y``.
 
@@ -101,30 +102,33 @@ General Aggregate Functions
     Returns the value of ``x`` associated with the minimum value of ``y`` over all input values.
 
 .. function:: min_by(x, y, n) -> array([same as x])
+    :noindex:
 
     Returns n values of ``x`` associated with the n smallest values of ``y`` in ascending order of ``y``.
 
-.. function:: max(x) -> [same as input]
+.. function:: max(x) -> [same as x]
 
     Returns the maximum value of all input values.
-    ``x`` must not contains nulls when it is complex type.
+    ``x`` must not contain nulls when it is complex type.
 
 .. function:: max(x, n) -> array<[same as x]>
+    :noindex:
 
     Returns ``n`` largest values of all input values of ``x``.
     ``n`` must be a positive integer and not exceed 10'000.
 
-.. function:: min(x) -> [same as input]
+.. function:: min(x) -> [same as x]
 
     Returns the minimum value of all input values.
-    ``x`` must not contains nulls when it is complex type.
+    ``x`` must not contain nulls when it is complex type.
 
 .. function:: min(x, n) -> array<[same as x]>
+    :noindex:
 
     Returns ``n`` smallest values of all input values of ``x``.
     ``n`` must be a positive integer and not exceed 10'000.
 
-.. function:: multimap_agg(key, value) -> map(K,array(V))
+.. function:: multimap_agg(K key, V value) -> map(K,array(V))
 
     Returns a multimap created from the input ``key`` / ``value`` pairs.
     Each key can be associated with multiple values.
@@ -138,6 +142,27 @@ General Aggregate Functions
     ``combineFunction`` will be invoked to combine two states into a new state.
     The final state is returned. Throws an error if ``initialState`` is NULL or
     ``inputFunction`` or ``combineFunction`` returns a NULL.
+
+    Take care when designing ``initialState``, ``inputFunction`` and ``combineFunction``.
+    These need to support evaluating aggregation in a distributed manner using partial
+    aggregation on many nodes, followed by shuffle over group-by keys, followed by
+    final aggregation. Given a set of all possible values of state, make sure that
+    combineFunction is `commutative <https://en.wikipedia.org/wiki/Commutative_property>`_
+    and `associative <https://en.wikipedia.org/wiki/Associative_property>`_
+    operation with initialState as the
+    `identity <https://en.wikipedia.org/wiki/Identity_element>`_ value.
+
+     combineFunction(s, initialState) = s for any s
+
+     combineFunction(s1, s2) = combineFunction(s2, s1) for any s1 and s2
+
+     combineFunction(s1, combineFunction(s2, s3)) = combineFunction(combineFunction(s1, s2), s3) for any s1, s2, s3
+
+    In addition, make sure that the following holds for the inputFunction:
+
+     inputFunction(inputFunction(initialState, x), y) = combineFunction(inputFunction(initialState, x), inputFunction(initialState, y)) for any x and y
+
+    Check out `blog post about reduce_agg <https://velox-lib.io/blog/reduce-agg>`_ for more context.
 
     Note that reduce_agg doesn't support evaluation over sorted inputs.::
 
@@ -190,13 +215,16 @@ General Aggregate Functions
         -- (1, 3.0)
         -- (2, 30.0)
 
-.. function:: set_agg(x) -> array<[same as input]>
+.. function:: set_agg(x) -> array<[same as x]>
 
     Returns an array created from the distinct input ``x`` elements.
+    ``x`` must not contain nulls when it is complex type.
 
 .. function:: set_union(array(T)) -> array(T)
 
     Returns an array of all the distinct values contained in each array of the input.
+
+    Returns an empty array if all input arrays are NULL.
 
     Example::
 
@@ -209,22 +237,26 @@ General Aggregate Functions
 
     Returns ARRAY[1, 2, 3, 4]
 
-.. function:: sum(x) -> [same as input]
+.. function:: sum(x) -> [same as x]
 
     Returns the sum of all input values.
 
 Bitwise Aggregate Functions
 ---------------------------
 
-.. function:: bitwise_and_agg(x) -> bigint
+.. function:: bitwise_and_agg(x) -> [same as x]
 
     Returns the bitwise AND of all input values in 2's complement representation.
 
-.. function:: bitwise_or_agg(x) -> bigint
+    Supported types are TINYINT, SMALLINT, INTEGER and BIGINT.
+
+.. function:: bitwise_or_agg(x) -> [same as x]
 
     Returns the bitwise OR of all input values in 2's complement representation.
 
-.. function:: bitwise_xor_agg(x) -> [same as input]
+    Supported types are TINYINT, SMALLINT, INTEGER and BIGINT.
+
+.. function:: bitwise_xor_agg(x) -> [same as x]
 
     Returns the bitwise XOR of all input values in 2's complement representation.
 
@@ -233,9 +265,9 @@ Bitwise Aggregate Functions
 Map Aggregate Functions
 -----------------------
 
-.. function:: map_agg(key, value) -> map(K,V)
+.. function:: map_agg(K key, V value) -> map(K,V)
 
-    Returns a map created from the input ``key`` / ``value`` pairs.
+    Returns a map created from the input ``key`` / ``value`` pairs. Inputs with NULL or duplicate keys are ignored.
 
 .. function:: map_union(map(K,V)) -> map(K,V)
 

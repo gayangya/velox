@@ -19,7 +19,7 @@ namespace facebook::velox::core {
 
 QueryCtx::QueryCtx(
     folly::Executor* executor,
-    std::unordered_map<std::string, std::string> queryConfigValues,
+    QueryConfig&& queryConfig,
     std::unordered_map<std::string, std::shared_ptr<Config>> connectorConfigs,
     cache::AsyncDataCache* cache,
     std::shared_ptr<memory::MemoryPool> pool,
@@ -30,7 +30,7 @@ QueryCtx::QueryCtx(
       cache_(cache),
       pool_(std::move(pool)),
       executor_(executor),
-      queryConfig_{std::move(queryConfigValues)},
+      queryConfig_{std::move(queryConfig)},
       spillExecutor_(std::move(spillExecutor)) {
   initPool(queryId);
 }

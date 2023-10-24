@@ -17,7 +17,8 @@
 #include "velox/core/Config.h"
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 
-#include <azure/storage/blobs.hpp>
+#include <azure/storage/blobs/blob_container_client.hpp>
+#include <azure/storage/blobs/block_blob_client.hpp>
 #include <fmt/format.h>
 #include <pwd.h>
 #include <unistd.h>
@@ -26,36 +27,23 @@
 
 namespace facebook::velox::filesystems::test {
 using namespace Azure::Storage::Blobs;
-static const std::string AzuriteServerExecutableName{"azurite"};
+static const std::string AzuriteServerExecutableName{"azurite-blob"};
 static const std::string AzuriteSearchPath{":/usr/bin/azurite"};
-static const std::string AzuriteDataLocation{"/tmp/azurite"};
-static const std::string AzuriteLogFile{"/tmp/azurite/azurite.log"};
 static const std::string AzuriteAccountName{"test"};
 static const std::string AzuriteContainerName{"test"};
 // the default key of Azurite Server used for connection
 static const std::string AzuriteAccountKey{
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="};
-static const std::string AzuriteConnectionString = fmt::format(
-    "DefaultEndpointsProtocol=http;AccountName={};AccountKey={};BlobEndpoint=http://127.0.0.1:10000/{};",
-    AzuriteAccountName,
-    AzuriteAccountKey,
-    AzuriteAccountName);
 static const std::string AzuriteABFSEndpoint = fmt::format(
     "abfs://{}@{}.dfs.core.windows.net/",
-    AzuriteContainerName,
-    AzuriteAccountName);
-
-static const std::vector<std::string> CommandOptions = {
-    "--silent",
-    "--location",
-    AzuriteDataLocation,
-    "--debug",
-    AzuriteLogFile,
-};
+    AzuriteAccountName,
+    AzuriteContainerName);
 
 class AzuriteServer {
  public:
-  AzuriteServer();
+  AzuriteServer(int64_t port);
+
+  const std::string connectionStr() const;
 
   void start();
 
@@ -63,13 +51,13 @@ class AzuriteServer {
 
   bool isRunning();
 
-  void addFile(
-      std::string source,
-      std::string destination,
-      std::string connectionString);
+  void addFile(std::string source, std::string destination);
 
   virtual ~AzuriteServer();
 
+ private:
+  int64_t port_;
+  std::vector<std::string> commandOptions_;
   std::unique_ptr<::boost::process::child> serverProcess_;
   boost::filesystem::path exePath_;
   boost::process::environment env_;

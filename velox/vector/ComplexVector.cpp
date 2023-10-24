@@ -459,7 +459,8 @@ BaseVector* RowVector::loadedVector() {
     if (!children_[i]) {
       continue;
     }
-    auto newChild = BaseVector::loadedVectorShared(children_[i]);
+    auto& newChild = BaseVector::loadedVectorShared(children_[i]);
+    // This is not needed but can potentially optimize decoding speed later.
     if (children_[i].get() != newChild.get()) {
       children_[i] = newChild;
     }
@@ -607,9 +608,28 @@ void ArrayVectorBase::copyRangesImpl(
 
 void RowVector::validate(const VectorValidateOptions& options) const {
   BaseVector::validate(options);
+  vector_size_t lastNonNullIndex{size()};
+
+  if (nulls_) {
+    lastNonNullIndex = bits::findLastBit(nulls_->as<uint64_t>(), 0, size());
+  }
+
   for (auto& child : children_) {
+    // TODO: Currently we arent checking for null children on ROWs
+    // since there are cases in SelectiveStructReader/DWIO/Koski where
+    // ROW Vectors with null children are created.
     if (child != nullptr) {
       child->validate(options);
+      if (child->size() < size()) {
+        VELOX_CHECK_NOT_NULL(
+            nulls_,
+            "Child vector has size less than parent and parent has no nulls.");
+
+        VELOX_CHECK_GT(
+            child->size(),
+            lastNonNullIndex,
+            "Child vector has size less than last non null row.");
+      }
     }
   }
 }
@@ -1233,6 +1253,17 @@ void MapVector::copyRanges(
     const BaseVector* source,
     const folly::Range<const CopyRange*>& ranges) {
   copyRangesImpl(source, ranges, &values_, &keys_);
+}
+
+void RowVector::appendNulls(vector_size_t numberOfRows) {
+  VELOX_CHECK_GE(numberOfRows, 0);
+  if (numberOfRows == 0) {
+    return;
+  }
+  auto newSize = numberOfRows + BaseVector::length_;
+  auto oldSize = BaseVector::length_;
+  BaseVector::resize(newSize, false);
+  bits::fillBits(mutableRawNulls(), oldSize, newSize, bits::kNull);
 }
 
 } // namespace velox

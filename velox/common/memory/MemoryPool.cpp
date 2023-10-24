@@ -772,7 +772,14 @@ bool MemoryPoolImpl::maybeIncrementReservationLocked(uint64_t size) {
       // query should also abort soon.
       VELOX_MEM_POOL_ABORTED("This memory pool has been aborted.");
     }
-    if (reservationBytes_ + size > capacity_) {
+
+    // NOTE: we allow memory pool to overuse its memory during the memory
+    // arbitration process. The memory arbitration process itself needs to
+    // ensure the the memory pool usage of the memory pool is within the
+    // capacity limit after the arbitration operation completes.
+    if (FOLLY_UNLIKELY(
+            (reservationBytes_ + size > capacity_) &&
+            !underMemoryArbitration())) {
       return false;
     }
   }
@@ -916,11 +923,13 @@ bool MemoryPoolImpl::reclaimableBytes(uint64_t& reclaimableBytes) const {
   return reclaimer()->reclaimableBytes(*this, reclaimableBytes);
 }
 
-uint64_t MemoryPoolImpl::reclaim(uint64_t targetBytes) {
+uint64_t MemoryPoolImpl::reclaim(
+    uint64_t targetBytes,
+    memory::MemoryReclaimer::Stats& stats) {
   if (reclaimer() == nullptr) {
     return 0;
   }
-  return reclaimer()->reclaim(this, targetBytes);
+  return reclaimer()->reclaim(this, targetBytes, stats);
 }
 
 void MemoryPoolImpl::enterArbitration() {

@@ -193,8 +193,9 @@ class OrderByTest : public OperatorTestBase {
       params.spillDirectory = spillDirectory->path;
       auto task = assertQueryOrdered(params, duckDbSql, sortingKeys);
       auto inputRows = toPlanStats(task->taskStats()).at(orderById).inputRows;
-      const uint64_t peakSpillMemoryUsage = Spiller::pool()->stats().peakBytes;
-      ASSERT_EQ(Spiller::pool()->stats().currentBytes, 0);
+      const uint64_t peakSpillMemoryUsage =
+          memory::spillMemoryPool()->stats().peakBytes;
+      ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
       if (inputRows > 0) {
         EXPECT_LT(0, spilledStats(*task).spilledInputBytes);
         EXPECT_LT(0, spilledStats(*task).spilledBytes);
@@ -202,10 +203,12 @@ class OrderByTest : public OperatorTestBase {
         EXPECT_LT(0, spilledStats(*task).spilledFiles);
         // NOTE: the last input batch won't go spilling.
         EXPECT_GT(inputRows, spilledStats(*task).spilledRows);
-        ASSERT_EQ(Spiller::pool()->stats().currentBytes, 0);
-        if (Spiller::pool()->trackUsage()) {
-          ASSERT_GT(Spiller::pool()->stats().peakBytes, 0);
-          ASSERT_GE(Spiller::pool()->stats().peakBytes, peakSpillMemoryUsage);
+        ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+        if (memory::spillMemoryPool()->trackUsage()) {
+          ASSERT_GT(memory::spillMemoryPool()->stats().peakBytes, 0);
+          ASSERT_GE(
+              memory::spillMemoryPool()->stats().peakBytes,
+              peakSpillMemoryUsage);
         }
       } else {
         EXPECT_EQ(0, spilledStats(*task).spilledInputBytes);
@@ -216,6 +219,7 @@ class OrderByTest : public OperatorTestBase {
   }
 
   folly::Random::DefaultGenerator rng_;
+  memory::MemoryReclaimer::Stats reclaimerStats_;
 };
 
 TEST_F(OrderByTest, selectiveFilter) {
@@ -686,12 +690,15 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringInputProcessing) {
     }
 
     if (testData.expectedReclaimable) {
-      op->reclaim(folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_));
+      op->reclaim(
+          folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+          reclaimerStats_);
       ASSERT_EQ(op->pool()->currentBytes(), 0);
     } else {
       VELOX_ASSERT_THROW(
           op->reclaim(
-              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_)),
+              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+              reclaimerStats_),
           "");
     }
 
@@ -709,6 +716,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringInputProcessing) {
     }
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
+  ASSERT_EQ(reclaimerStats_, memory::MemoryReclaimer::Stats{});
 }
 
 DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringReserve) {
@@ -802,7 +810,9 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringReserve) {
   ASSERT_TRUE(reclaimable);
   ASSERT_GT(reclaimableBytes, 0);
 
-  op->reclaim(folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_));
+  op->reclaim(
+      folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+      reclaimerStats_);
   ASSERT_EQ(op->pool()->currentBytes(), 0);
 
   driverWait.notify();
@@ -814,6 +824,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringReserve) {
   ASSERT_GT(stats[0].operatorStats[1].spilledBytes, 0);
   ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 1);
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  ASSERT_EQ(reclaimerStats_, memory::MemoryReclaimer::Stats{});
 }
 
 DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringAllocation) {
@@ -929,11 +940,14 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringAllocation) {
     }
 
     if (enableSpilling) {
-      op->reclaim(folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_));
+      op->reclaim(
+          folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+          reclaimerStats_);
     } else {
       VELOX_ASSERT_THROW(
           op->reclaim(
-              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_)),
+              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+              reclaimerStats_),
           "");
     }
 
@@ -947,6 +961,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringAllocation) {
     ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
+  ASSERT_EQ(reclaimerStats_, memory::MemoryReclaimer::Stats{1});
 }
 
 DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringOutputProcessing) {
@@ -1047,14 +1062,17 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringOutputProcessing) {
     if (enableSpilling) {
       ASSERT_GT(reclaimableBytes, 0);
       const auto usedMemoryBytes = op->pool()->currentBytes();
-      op->reclaim(folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_));
+      op->reclaim(
+          folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+          reclaimerStats_);
       // No reclaim as the operator has started output processing.
       ASSERT_EQ(usedMemoryBytes, op->pool()->currentBytes());
     } else {
       ASSERT_EQ(reclaimableBytes, 0);
       VELOX_ASSERT_THROW(
           op->reclaim(
-              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_)),
+              folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+              reclaimerStats_),
           "");
     }
 
@@ -1066,6 +1084,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringOutputProcessing) {
     ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
+  ASSERT_EQ(reclaimerStats_, memory::MemoryReclaimer::Stats{1});
 }
 
 DEBUG_ONLY_TEST_F(OrderByTest, abortDuringOutputProcessing) {

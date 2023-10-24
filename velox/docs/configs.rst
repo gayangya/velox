@@ -27,6 +27,10 @@ Generic Configuration
      - 10000
      - Max number of rows that could be return by operators from Operator::getOutput. It is used when an estimate of
        average row size is known and preferred_output_batch_bytes is used to compute the number of output rows.
+   * - table_scan_getoutput_time_limit_ms
+     - integer
+     - 5000
+     - TableScan operator will exit getOutput() method after this many milliseconds even if it has no data to return yet. Zero means 'no time limit'.
    * - abandon_partial_aggregation_min_rows
      - integer
      - 100,000
@@ -76,11 +80,22 @@ Generic Configuration
      - integer
      - 32MB
      - The target size for a Task's buffered output. The producer Drivers are blocked when the buffered size exceeds this.
-       The Drivers are resumed when the buffered size goes below PartitionedOutputBufferManager::kContinuePct (90)% of this.
+       The Drivers are resumed when the buffered size goes below OutputBufferManager::kContinuePct (90)% of this.
    * - min_table_rows_for_parallel_join_build
      - integer
      - 1000
      - The minimum number of table rows that can trigger the parallel hash join table build.
+   * - debug.validate_output_from_operators
+     - bool
+     - false
+     - If set to true, then during execution of tasks, the output vectors of every operator are validated for consistency.
+       This is an expensive check so should only be used for debugging. It can help debug issues where malformed vector
+       cause failures or crashes by helping identify which operator is generating them.
+   * - enable_expression_evaluation_cache
+     - bool
+     - true
+     - Whether to enable caches in expression evaluation. If set to true, optimizations including vector pools and
+       evalWithMemo are enabled.
 
 .. _expression-evaluation-conf:
 
@@ -171,19 +186,31 @@ Spilling
      - Spill memory to disk to avoid exceeding memory limits for the query.
    * - aggregation_spill_enabled
      - boolean
-     - false
-     - When `spill_enabled` is true, determines whether to spill memory to disk for aggregations to avoid exceeding
+     - true
+     - When `spill_enabled` is true, determines whether HashAggregation operator can spill to disk under memory pressure.
        memory limits for the query.
    * - join_spill_enabled
      - boolean
-     - false
-     - When `spill_enabled` is true, determines whether to spill memory to disk for hash joins to avoid exceeding memory
+     - true
+     - When `spill_enabled` is true, determines whether HashBuild and HashProbe operators can spill to disk under memory pressure.
        limits for the query.
    * - order_by_spill_enabled
      - boolean
-     - false
-     - When `spill_enabled` is true, determines whether to spill memory to disk for order by to avoid exceeding memory
+     - true
+     - When `spill_enabled` is true, determines whether OrderBy operator can spill to disk under memory pressure.
        limits for the query.
+   * - row_number_spill_enabled
+     - boolean
+     - true
+     - When `spill_enabled` is true, determines whether RowNumber operator can spill to disk under memory pressure.
+   * - topn_row_number_spill_enabled
+     - boolean
+     - true
+     - When `spill_enabled` is true, determines whether TopNRowNumber operator can spill to disk under memory pressure.
+   * - writer_spill_enabled
+     - boolean
+     - true
+     - When `writer_spill_enabled` is true, determines whether TableWriter operator can spill to disk under memory pressure.
    * - aggregation_spill_memory_threshold
      - integer
      - 0
@@ -191,9 +218,7 @@ Spilling
    * - aggregation_spill_all
      - boolean
      - false
-     - If true and spilling has been triggered during the input processing, the spiller will spill all the remaining
-     - in-memory state to disk before output processing. This is to simplify the aggregation query OOM prevention in
-     - output processing stage.
+     - If true and spilling has been triggered during the input processing, the spiller will spill all the remaining in-memory state to disk before output processing. This is to simplify the aggregation query OOM prevention in output processing stage.
    * - join_spill_memory_threshold
      - integer
      - 0
@@ -202,14 +227,21 @@ Spilling
      - integer
      - 0
      - Maximum amount of memory in bytes that an order by can use before spilling. 0 means unlimited.
+   * - min_spillable_reservation_pct
+     - integer
+     - 5
+     - The minimal available spillable memory reservation in percentage of the current memory usage. Suppose the current
+       memory usage size of M, available memory reservation size of N and min reservation percentage of P,
+       if M * P / 100 > N, then spiller operator needs to grow the memory reservation with percentage of
+       'spillable_reservation_growth_pct' (see below). This ensures we have sufficient amount of memory reservation to
+       process the large input outlier.
    * - spillable_reservation_growth_pct
      - integer
-     - 25
-     - The spillable memory reservation growth percentage of the current memory reservation size. Suppose a growth
-       percentage of N and the current memory reservation size of M, the next memory reservation size will be
-       M * (1 + N / 100). After growing the memory reservation K times, the memory reservation size will be
-       M * (1 + N / 100) ^ K. Hence the memory reservation grows along a series of powers of (1 + N / 100).
-       If the memory reservation fails, it starts spilling.
+     - 10
+     - The spillable memory reservation growth percentage of the current memory usage. Suppose a growth percentage of N
+       and the current memory usage size of M, the next memory reservation size will be M * (1 + N / 100). After growing
+       the memory reservation K times, the memory reservation size will be M * (1 + N / 100) ^ K. Hence the memory
+       reservation grows along a series of powers of (1 + N / 100). If the memory reservation fails, it starts spilling.
    * - max_spill_level
      - integer
      - 4
@@ -247,7 +279,7 @@ Spilling
    * - join_spiller_partition_bits
      - integer
      - 2
-     - The number of bits (N) used to calculate the spilling partition number for hash join: 2 ^ N. At the moment the maximum
+     - The number of bits (N) used to calculate the spilling partition number for hash join and RowNumber: 2 ^ N. At the moment the maximum
        value is 3, meaning we only support up to 8-way spill partitioning.
    * - aggregation_spiller_partition_bits
      - integer
@@ -340,7 +372,10 @@ Hive Connector
      - integer
      - 128MB
      - Maximum distance in bytes between chunks to be fetched that may be coalesced into a single request.
-
+   * - file_writer_flush_threshold_bytes
+     - integer
+     - 96MB
+     - Minimum memory footprint size required to reclaim memory from a file writer by flushing its buffered data to disk.
 
 ``Amazon S3 Configuration``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -413,6 +448,23 @@ Hive Connector
      - string
      -
      - The GCS service account configuration as json string.
+
+``Azure Blob Storage Configuration``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. list-table::
+   :widths: 30 10 10 60
+   :header-rows: 1
+
+   * - Property Name
+     - Type
+     - Default Value
+     - Description
+   * - fs.azure.account.key.<storage-account>.dfs.core.windows.net
+     - string
+     -
+     -  The credentials to access the specific Azure Blob Storage account, replace <storage-account> with the name of your Azure Storage account.
+        This property aligns with how Spark configures Azure account key credentials for accessing Azure storage, by setting this property multiple
+        times with different storage account names, you can access multiple Azure storage accounts.
 
 Presto-specific Configuration
 -----------------------------

@@ -398,13 +398,14 @@ uint64_t SharedArbitrator::reclaim(
   uint64_t reclaimDurationUs{0};
   uint64_t reclaimedBytes{0};
   uint64_t freedBytes{0};
+  MemoryReclaimer::Stats reclaimerStats;
   {
     MicrosecondTimer reclaimTimer(&reclaimDurationUs);
     const uint64_t oldCapacity = pool->capacity();
     try {
       freedBytes = pool->shrink(targetBytes);
       if (freedBytes < targetBytes) {
-        pool->reclaim(targetBytes - freedBytes);
+        pool->reclaim(targetBytes - freedBytes, reclaimerStats);
       }
     } catch (const std::exception& e) {
       VELOX_MEM_LOG(ERROR) << "Failed to reclaim from memory pool "
@@ -421,6 +422,7 @@ uint64_t SharedArbitrator::reclaim(
   numReclaimedBytes_ += reclaimedBytes - freedBytes;
   numShrunkBytes_ += freedBytes;
   reclaimTimeUs_ += reclaimDurationUs;
+  numNonReclaimableAttempts_ += reclaimerStats.numNonReclaimableAttempts;
   VELOX_MEM_LOG(INFO) << "Reclaimed from memory pool " << pool->name()
                       << " with target of " << succinctBytes(targetBytes)
                       << ", actually reclaimed " << succinctBytes(freedBytes)
@@ -437,8 +439,8 @@ void SharedArbitrator::abort(
   try {
     pool->abort(error);
   } catch (const std::exception& e) {
-    VELOX_MEM_LOG(WARNING) << "Failed to abort memory pool "
-                           << pool->toString();
+    VELOX_MEM_LOG(WARNING) << "Failed to abort memory pool " << pool->toString()
+                           << ", error: " << e.what();
   }
   // NOTE: no matter memory pool abort throws or not, it should have been marked
   // as aborted to prevent any new memory arbitration triggered from the aborted
@@ -492,6 +494,7 @@ MemoryArbitrator::Stats SharedArbitrator::statsLocked() const {
   stats.maxCapacityBytes = capacity_;
   stats.freeCapacityBytes = freeCapacity_;
   stats.reclaimTimeUs = reclaimTimeUs_;
+  stats.numNonReclaimableAttempts = numNonReclaimableAttempts_;
   return stats;
 }
 
@@ -513,8 +516,8 @@ SharedArbitrator::ScopedArbitration::ScopedArbitration(
     SharedArbitrator* arbitrator)
     : requestor_(requestor),
       arbitrator_(arbitrator),
-      startTime_(std::chrono::steady_clock::now()) {
-  VELOX_CHECK_NOT_NULL(requestor_);
+      startTime_(std::chrono::steady_clock::now()),
+      arbitrationCtx_(*requestor_) {
   VELOX_CHECK_NOT_NULL(arbitrator_);
   arbitrator_->startArbitration(requestor);
   if (arbitrator_->arbitrationStateCheckCb_ != nullptr) {

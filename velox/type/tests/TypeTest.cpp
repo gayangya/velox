@@ -32,6 +32,28 @@ void testTypeSerde(const TypePtr& type) {
 }
 } // namespace
 
+TEST(TypeTest, constructorThrow) {
+  EXPECT_NO_THROW(RowType({"a", "b"}, {VARCHAR(), INTEGER()}));
+
+  EXPECT_THROW(RowType({"a"}, {VARCHAR(), INTEGER()}), VeloxRuntimeError);
+  VELOX_ASSERT_THROW(
+      RowType({"a"}, {VARCHAR(), INTEGER()}),
+      "Mismatch names/types sizes: "
+      "[names: {'a'}, types: {VARCHAR, INTEGER}]");
+
+  EXPECT_THROW(RowType({"a", "b"}, {}), VeloxRuntimeError);
+  VELOX_ASSERT_THROW(
+      RowType({"a", "b"}, {}),
+      "Mismatch names/types sizes: "
+      "[names: {'a', 'b'}, types: { }]");
+
+  EXPECT_THROW(RowType({"a", "b"}, {VARCHAR(), nullptr}), VeloxRuntimeError);
+  VELOX_ASSERT_THROW(
+      RowType({"a", "b"}, {VARCHAR(), nullptr}),
+      "Child types cannot be null: "
+      "[names: {'a', 'b'}, types: {VARCHAR, NULL}]");
+}
+
 TEST(TypeTest, array) {
   auto arrayType = ARRAY(ARRAY(ARRAY(INTEGER())));
   EXPECT_EQ("ARRAY<ARRAY<ARRAY<INTEGER>>>", arrayType->toString());
@@ -63,6 +85,10 @@ TEST(TypeTest, integer) {
   EXPECT_EQ(int0->begin(), int0->end());
 
   testTypeSerde(int0);
+}
+
+TEST(TypeTest, hugeint) {
+  EXPECT_EQ(getType("HUGEINT", {}), HUGEINT());
 }
 
 TEST(TypeTest, timestamp) {
@@ -844,4 +870,96 @@ TEST(TypeTest, unionWith) {
       childRowType1->unionWith(childRowType2)->equivalent(*resultRowType));
   ASSERT_TRUE(
       childRowType1->unionWith(childRowType1)->equivalent(*resultRowType2));
+}
+
+TEST(TypeTest, orderableComparable) {
+  // Scalar type.
+  EXPECT_TRUE(INTEGER()->isOrderable());
+  EXPECT_TRUE(INTEGER()->isComparable());
+  EXPECT_TRUE(REAL()->isOrderable());
+  EXPECT_TRUE(REAL()->isComparable());
+  EXPECT_TRUE(VARCHAR()->isOrderable());
+  EXPECT_TRUE(VARCHAR()->isComparable());
+  EXPECT_TRUE(BIGINT()->isOrderable());
+  EXPECT_TRUE(BIGINT()->isComparable());
+  EXPECT_TRUE(DOUBLE()->isOrderable());
+  EXPECT_TRUE(DOUBLE()->isComparable());
+
+  // Map type.
+  auto mapType = MAP(INTEGER(), REAL());
+  EXPECT_FALSE(mapType->isOrderable());
+  EXPECT_TRUE(mapType->isComparable());
+
+  // Array type.
+  auto arrayType = ARRAY(INTEGER());
+  EXPECT_TRUE(arrayType->isOrderable());
+  EXPECT_TRUE(arrayType->isComparable());
+
+  arrayType = ARRAY(mapType);
+  EXPECT_FALSE(arrayType->isOrderable());
+  EXPECT_TRUE(arrayType->isComparable());
+
+  // Row type.
+  auto rowType = ROW({INTEGER(), REAL()});
+  EXPECT_TRUE(rowType->isOrderable());
+  EXPECT_TRUE(rowType->isComparable());
+
+  rowType = ROW({INTEGER(), mapType});
+  EXPECT_FALSE(rowType->isOrderable());
+  EXPECT_TRUE(rowType->isComparable());
+
+  // Decimal types.
+  auto shortDecimal = DECIMAL(10, 5);
+  EXPECT_TRUE(shortDecimal->isOrderable());
+  EXPECT_TRUE(shortDecimal->isComparable());
+
+  auto longDecimal = DECIMAL(30, 5);
+  EXPECT_TRUE(longDecimal->isOrderable());
+  EXPECT_TRUE(longDecimal->isComparable());
+
+  // Function type.
+  auto functionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{BIGINT(), VARCHAR()}, BOOLEAN());
+  EXPECT_FALSE(functionType->isOrderable());
+  EXPECT_FALSE(functionType->isComparable());
+
+  // Mixed.
+  mapType = MAP(INTEGER(), functionType);
+  EXPECT_FALSE(mapType->isOrderable());
+  EXPECT_FALSE(mapType->isComparable());
+
+  arrayType = ARRAY(mapType);
+  EXPECT_FALSE(arrayType->isOrderable());
+  EXPECT_FALSE(arrayType->isComparable());
+
+  rowType = ROW({INTEGER(), mapType});
+  EXPECT_FALSE(rowType->isOrderable());
+  EXPECT_FALSE(rowType->isComparable());
+}
+
+TEST(TypeTest, functionTypeEquivalent) {
+  auto functionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{BIGINT(), VARCHAR()}, BOOLEAN());
+  auto otherFunctionType =
+      std::make_shared<FunctionType>(std::vector<TypePtr>{BIGINT()}, BOOLEAN());
+  EXPECT_FALSE(functionType->equivalent(*otherFunctionType));
+
+  otherFunctionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{BIGINT(), VARCHAR()}, BOOLEAN());
+  EXPECT_TRUE(functionType->equivalent(*otherFunctionType));
+
+  functionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{ARRAY(BIGINT())}, BOOLEAN());
+  otherFunctionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{ARRAY(BIGINT())}, BOOLEAN());
+  EXPECT_TRUE(functionType->equivalent(*otherFunctionType));
+
+  functionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{MAP(BIGINT(), VARCHAR())}, BOOLEAN());
+  EXPECT_FALSE(functionType->equivalent(*otherFunctionType));
+
+  otherFunctionType = std::make_shared<FunctionType>(
+      std::vector<TypePtr>{MAP(BIGINT(), VARCHAR())}, BOOLEAN());
+
+  EXPECT_TRUE(functionType->equivalent(*otherFunctionType));
 }

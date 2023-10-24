@@ -235,7 +235,6 @@ class OperatorCtx {
       const std::string& connectorId,
       const std::string& planNodeId,
       memory::MemoryPool* connectorPool,
-      memory::SetMemoryReclaimer setMemoryReclaimer = nullptr,
       const common::SpillConfig* spillConfig = nullptr) const;
 
  private:
@@ -480,7 +479,9 @@ class Operator : public BaseRuntimeStatWriter {
   /// NOTE: this method doesn't return the actually freed memory bytes. The
   /// caller need to claim the actually freed memory space by shrinking the
   /// associated root memory pool's capacity accordingly.
-  virtual void reclaim(uint64_t targetBytes) {}
+  virtual void reclaim(
+      uint64_t targetBytes,
+      memory::MemoryReclaimer::Stats& stats) {}
 
   const core::PlanNodeId& planNodeId() const {
     return operatorCtx_->planNodeId();
@@ -535,10 +536,63 @@ class Operator : public BaseRuntimeStatWriter {
   /// the first one that is not std::nullopt or std::nullopt otherwise.
   static std::optional<uint32_t> maxDrivers(const core::PlanNodePtr& planNode);
 
+  /// The scoped objects to mark an operator is under non-reclaimable execution
+  /// section or not. This prevents the memory arbitrator from reclaiming memory
+  /// from the operator if it happens to be suspended for memory arbitration
+  /// processing. The driver execution framework marks an operator under
+  /// non-reclaimable section when executes any of its method. The spillable
+  /// operator might clear this temporarily during its execution to reserve
+  /// memory from arbitrator to allow memory reclaim from itself.
+  class ReclaimableSectionGuard {
+   public:
+    /// If 'enter' is true, marks 'op' is under non-reclaimable execution,
+    /// otherwise not.
+    ReclaimableSectionGuard(Operator* op)
+        : op_(op), nonReclaimableSection_(op_->nonReclaimableSection_) {
+      op_->nonReclaimableSection_ = false;
+    }
+
+    ~ReclaimableSectionGuard() {
+      op_->nonReclaimableSection_ = nonReclaimableSection_;
+    }
+
+   private:
+    Operator* const op_;
+    const bool nonReclaimableSection_;
+  };
+
+  class NonReclaimableSectionGuard {
+   public:
+    NonReclaimableSectionGuard(Operator* op)
+        : op_(op), nonReclaimableSection_(op_->nonReclaimableSection_) {
+      op_->nonReclaimableSection_ = true;
+    }
+
+    ~NonReclaimableSectionGuard() {
+      op_->nonReclaimableSection_ = nonReclaimableSection_;
+    }
+
+   private:
+    Operator* const op_;
+    const bool nonReclaimableSection_;
+  };
+
   /// Returns the operator context of this operator. This method is only used
   /// for test.
   const OperatorCtx* testingOperatorCtx() const {
     return operatorCtx_.get();
+  }
+
+  /// Returns true if this operator has received no more input signal. This
+  /// method is only used for test.
+  bool testingNoMoreInput() const {
+    return noMoreInput_;
+  }
+
+  /// Returns true if this operator is under non-reclaimable section, otherwise
+  /// not. This method is only used for test.
+  bool testingNonReclaimable() const {
+    return nonReclaimableSection_;
   }
 
  protected:
@@ -559,7 +613,10 @@ class Operator : public BaseRuntimeStatWriter {
         const memory::MemoryPool& pool,
         uint64_t& reclaimableBytes) const override;
 
-    uint64_t reclaim(memory::MemoryPool* pool, uint64_t targetBytes) override;
+    uint64_t reclaim(
+        memory::MemoryPool* pool,
+        uint64_t targetBytes,
+        memory::MemoryReclaimer::Stats& stats) override;
 
     void abort(memory::MemoryPool* pool, const std::exception_ptr& /* error */)
         override;
@@ -570,7 +627,6 @@ class Operator : public BaseRuntimeStatWriter {
       VELOX_CHECK_NOT_NULL(op_);
     }
 
-   private:
     // Gets the shared pointer to the associated driver to ensure the liveness
     // of the operator during the memory reclaim operation.
     //
@@ -583,26 +639,6 @@ class Operator : public BaseRuntimeStatWriter {
     Operator* const op_;
   };
 
-  /// The scoped object to mark a reclaimable operator is under non-reclaimable
-  /// execution section. This prevents the memory arbitrator from reclaiming
-  /// memory from the operator if it happens to be suspended for memory
-  /// arbitration processing.
-  class NonReclaimableSection {
-   public:
-    explicit NonReclaimableSection(Operator* op) : op_(op) {
-      VELOX_CHECK(!op_->nonReclaimableSection_);
-      op_->nonReclaimableSection_ = true;
-    }
-
-    ~NonReclaimableSection() {
-      VELOX_CHECK(op_->nonReclaimableSection_);
-      op_->nonReclaimableSection_ = false;
-    }
-
-   private:
-    Operator* const op_;
-  };
-
   /// Invoked to setup memory reclaimer for this operator's memory pool if its
   /// parent node memory pool has set the reclaimer.
   void maybeSetReclaimer();
@@ -612,12 +648,19 @@ class Operator : public BaseRuntimeStatWriter {
     return spillConfig_.has_value();
   }
 
-  /// Creates output vector from 'input_' and 'results_' according to
+  /// Creates output vector from 'input_' and 'results' according to
   /// 'identityProjections_' and 'resultProjections_'. If 'mapping' is set to
   /// nullptr, the children of the output vector will be identical to their
-  /// respective sources from 'input_' or 'results_'. However, if 'mapping' is
+  /// respective sources from 'input_' or 'results'. However, if 'mapping' is
   /// provided, the children of the output vector will be generated as
   /// dictionary of the sources using the specified 'mapping'.
+  RowVectorPtr fillOutput(
+      vector_size_t size,
+      const BufferPtr& mapping,
+      const std::vector<VectorPtr>& results);
+
+  /// Creates output vector from 'input_' and 'results_' according to
+  /// 'identityProjections_' and 'resultProjections_'.
   RowVectorPtr fillOutput(vector_size_t size, const BufferPtr& mapping);
 
   /// Returns the number of rows for the output batch. This uses averageRowSize
@@ -714,5 +757,4 @@ class SourceOperator : public Operator {
     VELOX_FAIL("SourceOperator does not support noMoreInput()");
   }
 };
-
 } // namespace facebook::velox::exec

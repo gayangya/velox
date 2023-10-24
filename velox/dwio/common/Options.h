@@ -21,6 +21,8 @@
 
 #include <folly/Executor.h>
 #include "velox/common/compression/Compression.h"
+#include "velox/common/config/SpillConfig.h"
+#include "velox/common/io/Options.h"
 #include "velox/common/memory/Memory.h"
 #include "velox/dwio/common/ColumnSelector.h"
 #include "velox/dwio/common/ErrorTolerance.h"
@@ -30,10 +32,7 @@
 #include "velox/dwio/common/ScanSpec.h"
 #include "velox/dwio/common/encryption/Encryption.h"
 
-namespace facebook {
-namespace velox {
-namespace dwio {
-namespace common {
+namespace facebook::velox::dwio::common {
 
 enum class FileFormat {
   UNKNOWN = 0,
@@ -118,7 +117,6 @@ class RowReaderOptions {
   // 'ioExecutor' enables parallelism when performing file system read
   // operations.
   std::shared_ptr<folly::Executor> decodingExecutor_;
-  std::shared_ptr<folly::Executor> ioExecutor_;
   bool appendRowNumberColumn_ = false;
   // Function to populate metrics related to feature projection stats
   // in Koski. This gets fired in FlatMapColumnReader.
@@ -127,6 +125,11 @@ class RowReaderOptions {
   std::function<void(
       facebook::velox::dwio::common::flatmap::FlatMapKeySelectionStats)>
       keySelectionCallback_;
+
+  // Function to track how much time we spend waiting on IO before reading rows
+  // (in dwrf row reader). todo: encapsulate this and keySelectionCallBack_ in a
+  // struct
+  std::function<void(uint64_t)> blockedOnIoCallback_;
   bool eagerFirstStripeLoad = true;
   uint64_t skipRows_ = 0;
 
@@ -304,10 +307,6 @@ class RowReaderOptions {
     decodingExecutor_ = executor;
   }
 
-  void setIOExecutor(std::shared_ptr<folly::Executor> executor) {
-    ioExecutor_ = executor;
-  }
-
   /*
    * Set to true, if you want to add a new column to the results containing the
    * row numbers.  These row numbers are relative to the beginning of file (0 as
@@ -335,6 +334,15 @@ class RowReaderOptions {
     return keySelectionCallback_;
   }
 
+  void setBlockedOnIoCallback(
+      std::function<void(int64_t)> blockedOnIoCallback) {
+    blockedOnIoCallback_ = std::move(blockedOnIoCallback);
+  }
+
+  const std::function<void(int64_t)> getBlockedOnIoCallback() const {
+    return blockedOnIoCallback_;
+  }
+
   void setSkipRows(uint64_t skipRows) {
     skipRows_ = skipRows;
   }
@@ -346,114 +354,64 @@ class RowReaderOptions {
   const std::shared_ptr<folly::Executor>& getDecodingExecutor() const {
     return decodingExecutor_;
   }
-
-  const std::shared_ptr<folly::Executor>& getIOExecutor() const {
-    return ioExecutor_;
-  }
-};
-
-/**
- * Mode for prefetching data.
- *
- * This mode may be ignored for a reader, such as DWRF, where it does not
- * make sense.
- *
- * To enable single-buffered reading, using the default autoPreloadLength:
- *         ReaderOptions readerOpts;
- *         readerOpts.setPrefetchMode(PrefetchMode::PRELOAD);
- * To enable double-buffered reading, using the default autoPreloadLength:
- *         ReaderOptions readerOpts;
- *         readerOpts.setPrefetchMode(PrefetchMode::PREFETCH);
- * To select unbuffered reading:
- *         ReaderOptions readerOpts;
- *         readerOpts.setPrefetchMode(PrefetchMode::NOT_SET);
- *
- * Single-buffered reading (as in dwio::PreloadableInputStream)
- * reads ahead into a buffer.   Double-buffered reading additionally reads
- * asynchronously into a second buffer, swaps the buffers when the
- * first is fully consumed and the second has been filled, and then starts
- * a new parallel read.  For clients with a slow network connection to
- * Warm Storage, enabling PREFETCH reduces elapsed time by 10% or more,
- * at the cost of a second buffer.   The relative improvment would be greater
- * for cases where the network throughput is higher.
- */
-enum class PrefetchMode {
-  NOT_SET = 0,
-  PRELOAD = 1, // read a buffer of autoPreloadLength bytes on a read beyond the
-               // current buffer, if any.
-  PREFETCH = 2, // read a second buffer of autoPreloadLength bytes ahead of
-                // actual reads.
 };
 
 /**
  * Options for creating a Reader.
  */
-class ReaderOptions {
+class ReaderOptions : public io::ReaderOptions {
  private:
   uint64_t tailLocation;
-  velox::memory::MemoryPool* memoryPool;
   FileFormat fileFormat;
   RowTypePtr fileSchema;
-  uint64_t autoPreloadLength;
-  PrefetchMode prefetchMode;
-  int32_t loadQuantum_{kDefaultLoadQuantum};
-  int32_t maxCoalesceDistance_{kDefaultCoalesceDistance};
-  int64_t maxCoalesceBytes_{kDefaultCoalesceBytes};
   SerDeOptions serDeOptions;
   std::shared_ptr<encryption::DecrypterFactory> decrypterFactory_;
   uint64_t directorySizeGuess{kDefaultDirectorySizeGuess};
   uint64_t filePreloadThreshold{kDefaultFilePreloadThreshold};
   bool fileColumnNamesReadAsLowerCase{false};
   bool useColumnNamesForColumnMapping_{false};
+  std::shared_ptr<folly::Executor> ioExecutor_;
 
  public:
-  static constexpr int32_t kDefaultLoadQuantum = 8 << 20; // 8MB
-  static constexpr int32_t kDefaultCoalesceDistance = 512 << 10; // 512K
-  static constexpr int32_t kDefaultCoalesceBytes = 128 << 20; // 128M
   static constexpr uint64_t kDefaultDirectorySizeGuess = 1024 * 1024; // 1MB
   static constexpr uint64_t kDefaultFilePreloadThreshold =
       1024 * 1024 * 8; // 8MB
 
   explicit ReaderOptions(velox::memory::MemoryPool* pool)
-      : tailLocation(std::numeric_limits<uint64_t>::max()),
-        memoryPool(pool),
+      : io::ReaderOptions(pool),
+        tailLocation(std::numeric_limits<uint64_t>::max()),
         fileFormat(FileFormat::UNKNOWN),
-        fileSchema(nullptr),
-        autoPreloadLength(DEFAULT_AUTO_PRELOAD_SIZE),
-        prefetchMode(PrefetchMode::PREFETCH) {}
+        fileSchema(nullptr) {}
 
   ReaderOptions& operator=(const ReaderOptions& other) {
+    io::ReaderOptions::operator=(other);
     tailLocation = other.tailLocation;
-    memoryPool = other.memoryPool;
     fileFormat = other.fileFormat;
     if (other.fileSchema != nullptr) {
       fileSchema = other.getFileSchema();
     } else {
       fileSchema = nullptr;
     }
-    autoPreloadLength = other.autoPreloadLength;
-    prefetchMode = other.prefetchMode;
     serDeOptions = other.serDeOptions;
     decrypterFactory_ = other.decrypterFactory_;
     directorySizeGuess = other.directorySizeGuess;
     filePreloadThreshold = other.filePreloadThreshold;
     fileColumnNamesReadAsLowerCase = other.fileColumnNamesReadAsLowerCase;
     useColumnNamesForColumnMapping_ = other.useColumnNamesForColumnMapping_;
-    maxCoalesceDistance_ = other.maxCoalesceDistance_;
-    maxCoalesceBytes_ = other.maxCoalesceBytes_;
     return *this;
   }
 
-  ReaderOptions(const ReaderOptions& other) {
-    *this = other;
-  }
-
-  /**
-   * Set the memory allocator.
-   */
-  ReaderOptions& setMemoryPool(velox::memory::MemoryPool& pool) {
-    memoryPool = &pool;
-    return *this;
+  ReaderOptions(const ReaderOptions& other)
+      : io::ReaderOptions(other),
+        tailLocation(other.tailLocation),
+        fileFormat(other.fileFormat),
+        fileSchema(other.fileSchema),
+        serDeOptions(other.serDeOptions),
+        decrypterFactory_(other.decrypterFactory_),
+        directorySizeGuess(other.directorySizeGuess),
+        filePreloadThreshold(other.filePreloadThreshold),
+        fileColumnNamesReadAsLowerCase(other.fileColumnNamesReadAsLowerCase),
+        useColumnNamesForColumnMapping_(other.useColumnNamesForColumnMapping_) {
   }
 
   /**
@@ -481,44 +439,6 @@ class ReaderOptions {
    */
   ReaderOptions& setTailLocation(uint64_t offset) {
     tailLocation = offset;
-    return *this;
-  }
-
-  /**
-   * Modify the autoPreloadLength
-   */
-  ReaderOptions& setAutoPreloadLength(uint64_t len) {
-    autoPreloadLength = len;
-    return *this;
-  }
-
-  /**
-   * Modify the prefetch mode.
-   */
-  ReaderOptions& setPrefetchMode(PrefetchMode mode) {
-    prefetchMode = mode;
-    return *this;
-  }
-
-  /**
-   * Modify the load quantum.
-   */
-  ReaderOptions& setLoadQuantum(int32_t quantum) {
-    loadQuantum_ = quantum;
-    return *this;
-  }
-  /**
-   * Modify the maximum load coalesce distance.
-   */
-  ReaderOptions& setMaxCoalesceDistance(int32_t distance) {
-    maxCoalesceDistance_ = distance;
-    return *this;
-  }
-  /**
-   * Modify the maximum load coalesce bytes.
-   */
-  ReaderOptions& setMaxCoalesceBytes(int64_t bytes) {
-    maxCoalesceBytes_ = bytes;
     return *this;
   }
 
@@ -556,19 +476,17 @@ class ReaderOptions {
     return *this;
   }
 
+  ReaderOptions& setIOExecutor(std::shared_ptr<folly::Executor> executor) {
+    ioExecutor_ = std::move(executor);
+    return *this;
+  }
+
   /**
    * Get the desired tail location.
    * @return if not set, return the maximum long.
    */
   uint64_t getTailLocation() const {
     return tailLocation;
-  }
-
-  /**
-   * Get the memory allocator.
-   */
-  velox::memory::MemoryPool& getMemoryPool() const {
-    return *memoryPool;
   }
 
   /**
@@ -583,26 +501,6 @@ class ReaderOptions {
    */
   const std::shared_ptr<const velox::RowType>& getFileSchema() const {
     return fileSchema;
-  }
-
-  uint64_t getAutoPreloadLength() const {
-    return autoPreloadLength;
-  }
-
-  PrefetchMode getPrefetchMode() const {
-    return prefetchMode;
-  }
-
-  int32_t loadQuantum() const {
-    return loadQuantum_;
-  }
-
-  int32_t maxCoalesceDistance() const {
-    return maxCoalesceDistance_;
-  }
-
-  int64_t maxCoalesceBytes() const {
-    return maxCoalesceBytes_;
   }
 
   SerDeOptions& getSerDeOptions() {
@@ -626,6 +524,10 @@ class ReaderOptions {
     return filePreloadThreshold;
   }
 
+  const std::shared_ptr<folly::Executor>& getIOExecutor() const {
+    return ioExecutor_;
+  }
+
   bool isFileColumnNamesReadAsLowerCase() const {
     return fileColumnNamesReadAsLowerCase;
   }
@@ -638,11 +540,10 @@ class ReaderOptions {
 struct WriterOptions {
   TypePtr schema;
   velox::memory::MemoryPool* memoryPool;
-  velox::memory::SetMemoryReclaimer setMemoryReclaimer{nullptr};
+  const velox::common::SpillConfig* spillConfig{nullptr};
   std::optional<velox::common::CompressionKind> compressionKind;
+  std::optional<uint64_t> maxStripeSize{std::nullopt};
+  std::optional<uint64_t> maxDictionaryMemory{std::nullopt};
 };
 
-} // namespace common
-} // namespace dwio
-} // namespace velox
-} // namespace facebook
+} // namespace facebook::velox::dwio::common

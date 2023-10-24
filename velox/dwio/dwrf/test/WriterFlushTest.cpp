@@ -65,9 +65,7 @@ class MockMemoryPool : public velox::memory::MemoryPool {
     VELOX_NYI("{} unsupported", __FUNCTION__);
   }
 
-  void release() override {
-    VELOX_NYI("{} unsupported", __FUNCTION__);
-  }
+  void release() override {}
 
   Stats stats() const override {
     VELOX_NYI("{} unsupported", __FUNCTION__);
@@ -180,12 +178,10 @@ class MockMemoryPool : public velox::memory::MemoryPool {
   }
 
   void setReclaimer(
-      std::unique_ptr<memory::MemoryReclaimer> reclaimer) override {
-    VELOX_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
+      std::unique_ptr<memory::MemoryReclaimer> reclaimer) override {}
 
   memory::MemoryReclaimer* reclaimer() const override {
-    VELOX_UNSUPPORTED("{} unsupported", __FUNCTION__);
+    return nullptr;
   }
 
   void enterArbitration() override {
@@ -200,7 +196,9 @@ class MockMemoryPool : public velox::memory::MemoryPool {
     VELOX_UNSUPPORTED("{} unsupported", __FUNCTION__);
   }
 
-  uint64_t reclaim(uint64_t targetBytes) override {
+  uint64_t reclaim(
+      uint64_t /*unused*/,
+      velox::memory::MemoryReclaimer::Stats& /*unused*/) override {
     VELOX_UNSUPPORTED("{} unsupported", __FUNCTION__);
   }
 

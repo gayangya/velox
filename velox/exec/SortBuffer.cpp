@@ -15,6 +15,7 @@
  */
 
 #include "SortBuffer.h"
+#include "velox/exec/MemoryReclaimer.h"
 #include "velox/vector/BaseVector.h"
 
 namespace facebook::velox::exec {
@@ -85,14 +86,6 @@ void SortBuffer::addInput(const VectorPtr& input) {
   VELOX_CHECK(!noMoreInput_);
   ensureInputFits(input);
 
-  // Prevents the memory arbitrator to reclaim memory from this sort buffer
-  // during the execution below.
-  //
-  // NOTE: 'nonReclaimableSection_' points to the corresponding flag in the
-  // associated OrderBy/TableWriter operator.
-  auto guard = folly::makeGuard([this]() { *nonReclaimableSection_ = false; });
-  *nonReclaimableSection_ = true;
-
   SelectivityVector allRows(input->size());
   std::vector<char*> rows(input->size());
   for (int row = 0; row < input->size(); ++row) {
@@ -154,6 +147,7 @@ void SortBuffer::noMoreInput() {
 
 RowVectorPtr SortBuffer::getOutput() {
   VELOX_CHECK(noMoreInput_);
+
   if (numOutputRows_ == numInputRows_) {
     return nullptr;
   }
@@ -173,6 +167,11 @@ void SortBuffer::spill(int64_t targetRows, int64_t targetBytes) {
   VELOX_CHECK_GE(targetRows, 0);
   VELOX_CHECK_GE(targetBytes, 0);
 
+  // Check if sort buffer is empty or not, and skip spill if it is empty.
+  if (data_->numRows() == 0) {
+    return;
+  }
+
   ++(*numSpillRuns_);
   if (spiller_ == nullptr) {
     spiller_ = std::make_unique<Spiller>(
@@ -183,11 +182,11 @@ void SortBuffer::spill(int64_t targetRows, int64_t targetBytes) {
         data_->keyTypes().size(),
         sortCompareFlags_,
         spillConfig_->filePath,
-        spillConfig_->maxFileSize,
+        std::numeric_limits<uint64_t>::max(),
         spillConfig_->writeBufferSize,
         spillConfig_->minSpillRunSize,
         spillConfig_->compressionKind,
-        Spiller::pool(),
+        memory::spillMemoryPool(),
         spillConfig_->executor);
     VELOX_CHECK_EQ(spiller_->state().maxPartitions(), 1);
   }
@@ -271,8 +270,11 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
   const auto targetIncrementBytes = std::max<int64_t>(
       estimatedIncrementalBytes * 2,
       currentMemoryUsage * spillConfig_->spillableReservationGrowthPct / 100);
-  if (pool_->maybeReserve(targetIncrementBytes)) {
-    return;
+  {
+    exec::ReclaimableSectionGuard guard(nonReclaimableSection_);
+    if (pool_->maybeReserve(targetIncrementBytes)) {
+      return;
+    }
   }
 
   // NOTE: disk spilling use the system disk spilling memory pool instead of

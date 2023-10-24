@@ -15,7 +15,7 @@
  */
 #include "velox/exec/tests/utils/LocalExchangeSource.h"
 #include "velox/common/testutil/TestValue.h"
-#include "velox/exec/PartitionedOutputBufferManager.h"
+#include "velox/exec/OutputBufferManager.h"
 
 namespace facebook::velox::exec::test {
 namespace {
@@ -60,8 +60,8 @@ class LocalExchangeSource : public exec::ExchangeSource {
 
     promise_ = std::move(promise);
 
-    auto buffers = PartitionedOutputBufferManager::getInstance().lock();
-    VELOX_CHECK_NOT_NULL(buffers, "invalid PartitionedOutputBufferManager");
+    auto buffers = OutputBufferManager::getInstance().lock();
+    VELOX_CHECK_NOT_NULL(buffers, "invalid OutputBufferManager");
     VELOX_CHECK(requestPending_);
     auto requestedSequence = sequence_;
     auto self = shared_from_this();
@@ -150,7 +150,7 @@ class LocalExchangeSource : public exec::ExchangeSource {
   void close() override {
     checkSetRequestPromise();
 
-    auto buffers = PartitionedOutputBufferManager::getInstance().lock();
+    auto buffers = OutputBufferManager::getInstance().lock();
     buffers->deleteResults(taskId_, destination_);
   }
 
@@ -178,8 +178,8 @@ class LocalExchangeSource : public exec::ExchangeSource {
   }
 
   // Records the total number of pages fetched from sources.
-  int64_t numPages_{0};
-  uint64_t totalBytes_{0};
+  std::atomic<int64_t> numPages_{0};
+  std::atomic<uint64_t> totalBytes_{0};
   VeloxPromise<Response> promise_{VeloxPromise<Response>::makeEmpty()};
   int32_t numRequests_{0};
 };
@@ -194,6 +194,8 @@ std::unique_ptr<ExchangeSource> createLocalExchangeSource(
   if (strncmp(taskId.c_str(), "local://", 8) == 0) {
     return std::make_unique<LocalExchangeSource>(
         taskId, destination, std::move(queue), pool);
+  } else if (strncmp(taskId.c_str(), "bad://", 6) == 0) {
+    throw std::runtime_error("Testing error");
   }
   return nullptr;
 }

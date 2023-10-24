@@ -146,6 +146,11 @@ class DataSink {
     return 0;
   }
 
+  /// Returns the number of files written on disk by this data sink so far.
+  virtual int32_t numWrittenFiles() const {
+    return 0;
+  }
+
   /// Called once after all data has been added via possibly multiple calls to
   /// appendData(). The function returns the metadata of written data in string
   /// form on success. If 'success' is false, this function aborts any pending
@@ -227,7 +232,6 @@ class ConnectorQueryCtx {
   ConnectorQueryCtx(
       memory::MemoryPool* operatorPool,
       memory::MemoryPool* connectorPool,
-      memory::SetMemoryReclaimer setMemoryReclaimer,
       const Config* connectorConfig,
       const common::SpillConfig* spillConfig,
       std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator,
@@ -238,7 +242,6 @@ class ConnectorQueryCtx {
       int driverId)
       : operatorPool_(operatorPool),
         connectorPool_(connectorPool),
-        setMemoryReclaimer_(std::move(setMemoryReclaimer)),
         config_(connectorConfig),
         spillConfig_(spillConfig),
         expressionEvaluator_(std::move(expressionEvaluator)),
@@ -264,18 +267,11 @@ class ConnectorQueryCtx {
     return connectorPool_;
   }
 
-  /// Returns the callback to set memory pool reclaimer if set. This is used by
-  /// file writer to set memory reclaimer for its internal used memory pools to
-  /// integrate with memory arbitration.
-  const memory::SetMemoryReclaimer& setMemoryReclaimer() const {
-    return setMemoryReclaimer_;
-  }
-
   const Config* config() const {
     return config_;
   }
 
-  const common::SpillConfig* getSpillConfig() const {
+  const common::SpillConfig* spillConfig() const {
     return spillConfig_;
   }
 
@@ -314,7 +310,6 @@ class ConnectorQueryCtx {
  private:
   memory::MemoryPool* const operatorPool_;
   memory::MemoryPool* const connectorPool_;
-  const memory::SetMemoryReclaimer setMemoryReclaimer_;
   const Config* config_;
   const common::SpillConfig* const spillConfig_;
   std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator_;

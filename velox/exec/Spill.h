@@ -171,6 +171,9 @@ struct SpillStats {
   uint64_t spillFlushTimeUs{0};
   /// The time spent on writing spilled rows to disk.
   uint64_t spillWriteTimeUs{0};
+  /// The number of times that an hash build operator exceeds the max spill
+  /// limit.
+  uint64_t spillMaxLevelExceededCount{0};
 
   SpillStats(
       uint64_t _spillRuns,
@@ -184,7 +187,8 @@ struct SpillStats {
       uint64_t _spillSerializationTimeUs,
       uint64_t _spillDiskWrites,
       uint64_t _spillFlushTimeUs,
-      uint64_t _spillWriteTimeUs);
+      uint64_t _spillWriteTimeUs,
+      uint64_t _spillMaxLevelExceededCount);
 
   SpillStats() = default;
 
@@ -527,12 +531,14 @@ class SpillPartition {
   explicit SpillPartition(const SpillPartitionId& id)
       : SpillPartition(id, {}) {}
 
-  SpillPartition(const SpillPartitionId& id, SpillFiles files)
-      : id_(id), files_(std::move(files)) {}
+  SpillPartition(const SpillPartitionId& id, SpillFiles files) : id_(id) {
+    addFiles(std::move(files));
+  }
 
   void addFiles(SpillFiles files) {
     files_.reserve(files_.size() + files.size());
     for (auto& file : files) {
+      size_ += file->size();
       files_.push_back(std::move(file));
     }
   }
@@ -545,6 +551,11 @@ class SpillPartition {
     return files_.size();
   }
 
+  /// Returns the total file byte size of this spilled partition.
+  uint64_t size() const {
+    return size_;
+  }
+
   /// Invoked to split this spill partition into 'numShards' to process in
   /// parallel.
   ///
@@ -555,9 +566,13 @@ class SpillPartition {
   /// The created reader will take the ownership of the spill files.
   std::unique_ptr<UnorderedStreamReader<BatchStream>> createReader();
 
+  std::string toString() const;
+
  private:
   SpillPartitionId id_;
   SpillFiles files_;
+  // Counts the total file size in bytes from this spilled partition.
+  uint64_t size_{0};
 };
 
 using SpillPartitionSet =
@@ -620,16 +635,15 @@ class SpillState {
     return spilledPartitionSet_.size() == maxPartitions_;
   }
 
-  // Appends data to 'partition'. The rows given by 'indices' must be
-  // sorted for a sorted spill and must hash to 'partition'. It is
-  // safe to call this on multiple threads if all threads specify a
-  // different partition.
-  // Returns the size to sppend to partition.
+  /// Appends data to 'partition'. The rows given by 'indices' must be sorted
+  /// for a sorted spill and must hash to 'partition'. It is safe to call this
+  /// on multiple threads if all threads specify a different partition. Returns
+  /// the size to append to partition.
   uint64_t appendToPartition(int32_t partition, const RowVectorPtr& rows);
 
-  // Finishes a sorted run for 'partition'. If write is called for 'partition'
-  // again, the data does not have to be sorted relative to the data
-  // written so far.
+  /// Finishes a sorted run for 'partition'. If write is called for 'partition'
+  /// again, the data does not have to be sorted relative to the data written so
+  /// far.
   void finishWrite(int32_t partition) {
     VELOX_DCHECK(isPartitionSpilled(partition));
     files_[partition]->finishFile();
@@ -640,9 +654,9 @@ class SpillState {
   /// no spilled data.
   SpillFiles files(int32_t partition);
 
-  // Starts reading values for 'partition'. If 'extra' is non-null, it can be
-  // a stream of rows from a RowContainer so as to merge unspilled data with
-  // spilled data.
+  /// Starts reading values for 'partition'. If 'extra' is non-null, it can be
+  /// a stream of rows from a RowContainer so as to merge unspilled data with
+  /// spilled data.
   std::unique_ptr<TreeOfLosers<SpillMergeStream>> startMerge(
       int32_t partition,
       std::unique_ptr<SpillMergeStream>&& extra);
@@ -688,6 +702,7 @@ SpillPartitionIdSet toSpillPartitionIdSet(
 /// The utilities to update the process wide spilling stats.
 /// Updates the number of spill runs.
 void updateGlobalSpillRunStats(uint64_t numRuns);
+
 /// Updates the stats of new append spilled rows including the number of spilled
 /// rows and the serializaion time.
 void updateGlobalSpillAppendStats(
@@ -695,10 +710,13 @@ void updateGlobalSpillAppendStats(
     uint64_t serializaionTimeUs);
 /// Increments the number of spilled partitions.
 void incrementGlobalSpilledPartitionStats();
+
 /// Updates the time spent on filling rows to spill.
 void updateGlobalSpillFillTime(uint64_t timeUs);
+
 /// Updates the time spent on sorting rows to spill.
 void updateGlobalSpillSortTime(uint64_t timeUs);
+
 /// Updates the stats for disk write including the number of disk writes,
 /// the written bytes, the time spent on copying out (compression) for disk
 /// writes, the time spent on disk writes.
@@ -707,11 +725,16 @@ void updateGlobalSpillWriteStats(
     uint64_t spilledBytes,
     uint64_t flushTimeUs,
     uint64_t writeTimeUs);
-// Increment the spill memory bytes.
+
+/// Increment the spill memory bytes.
 void updateGlobalSpillMemoryBytes(uint64_t spilledInputBytes);
 
 /// Increments the spilled files by one.
 void incrementGlobalSpilledFiles();
+
+/// Increments the exceeded max spill level count.
+void updateGlobalMaxSpillLevelExceededCount(
+    uint64_t maxSpillLevelExceededCount);
 
 /// Gets the cumulative global spill stats.
 SpillStats globalSpillStats();

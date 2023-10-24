@@ -27,7 +27,7 @@ class SelectiveDwrfReader {
  public:
   static std::unique_ptr<dwio::common::SelectiveColumnReader> build(
       const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
-      const std::shared_ptr<const dwio::common::TypeWithId>& dataType,
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       DwrfParams& params,
       common::ScanSpec& scanSpec,
       bool isRoot = false);
@@ -36,14 +36,15 @@ class SelectiveDwrfReader {
   // separate.
   static std::unique_ptr<dwio::common::SelectiveColumnReader> build(
       const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
-      const std::shared_ptr<const dwio::common::TypeWithId>& dataType,
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       StripeStreams& stripe,
       const StreamLabels& streamLabels,
+      dwio::common::ColumnReaderStatistics& stats,
       common::ScanSpec* FOLLY_NONNULL scanSpec,
       FlatMapContext flatMapContext = {},
       bool isRoot = false) {
-    auto params = DwrfParams(stripe, streamLabels, flatMapContext);
-    return build(requestedType, dataType, params, *scanSpec, isRoot);
+    auto params = DwrfParams(stripe, streamLabels, stats, flatMapContext);
+    return build(requestedType, fileType, params, *scanSpec, isRoot);
   }
 };
 
@@ -55,13 +56,15 @@ class SelectiveColumnReaderFactory : public ColumnReaderFactory {
 
   std::unique_ptr<dwio::common::SelectiveColumnReader> buildSelective(
       const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
-      const std::shared_ptr<const dwio::common::TypeWithId>& dataType,
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       StripeStreams& stripe,
       const StreamLabels& streamLabels,
+      dwio::common::ColumnReaderStatistics& stats,
       FlatMapContext flatMapContext = {}) {
-    auto params = DwrfParams(stripe, streamLabels, std::move(flatMapContext));
+    auto params =
+        DwrfParams(stripe, streamLabels, stats, std::move(flatMapContext));
     auto reader =
-        SelectiveDwrfReader::build(requestedType, dataType, params, *scanSpec_);
+        SelectiveDwrfReader::build(requestedType, fileType, params, *scanSpec_);
     reader->setIsTopLevel();
     return reader;
   }

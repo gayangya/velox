@@ -42,6 +42,24 @@ class SortBufferTest : public OperatorTestBase {
     rng_.seed(123);
   }
 
+  common::SpillConfig getSpillConfig(const std::string& spillFilePath) const {
+    return common::SpillConfig(
+        spillFilePath,
+        0,
+        0,
+        0,
+        executor_.get(),
+        5,
+        10,
+        0,
+        0,
+        0,
+        false,
+        0,
+        0,
+        "none");
+  }
+
   const RowTypePtr inputType_ = ROW(
       {{"c0", BIGINT()},
        {"c1", INTEGER()},
@@ -279,7 +297,8 @@ TEST_F(SortBufferTest, batchOutput) {
         0,
         1000,
         executor_.get(),
-        100,
+        5,
+        10,
         0,
         0,
         0,
@@ -373,6 +392,7 @@ TEST_F(SortBufferTest, spill) {
         0,
         1000,
         executor_.get(),
+        100,
         spillableReservationGrowthPct,
         0,
         0,
@@ -393,12 +413,13 @@ TEST_F(SortBufferTest, spill) {
         testData.spillMemoryThreshold);
 
     const std::shared_ptr<memory::MemoryPool> fuzzerPool =
-        memory::addDefaultLeafMemoryPool("VectorFuzzer");
+        memory::addDefaultLeafMemoryPool("spillSource");
     VectorFuzzer fuzzer({.vectorSize = 1024}, fuzzerPool.get());
     uint64_t totalNumInput = 0;
 
-    ASSERT_EQ(Spiller::pool()->stats().currentBytes, 0);
-    const auto peakSpillMemoryUsage = Spiller::pool()->stats().peakBytes;
+    ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+    const auto peakSpillMemoryUsage =
+        memory::spillMemoryPool()->stats().peakBytes;
 
     for (int i = 0; i < 3; ++i) {
       sortBuffer->addInput(fuzzer.fuzzRow(inputType_));
@@ -418,14 +439,48 @@ TEST_F(SortBufferTest, spill) {
       ASSERT_LE(spillStats->spilledRows, totalNumInput);
       ASSERT_GT(spillStats->spilledBytes, 0);
       ASSERT_EQ(spillStats->spilledPartitions, 1);
-      ASSERT_GT(spillStats->spilledFiles, 0);
+      // SortBuffer shall not respect maxFileSize. Total files should be num
+      // addInput() calls minus one which is the first one that has nothing to
+      // spill.
+      ASSERT_EQ(spillStats->spilledFiles, 2);
       sortBuffer.reset();
-      ASSERT_EQ(Spiller::pool()->stats().currentBytes, 0);
-      if (Spiller::pool()->trackUsage()) {
-        ASSERT_GT(Spiller::pool()->stats().peakBytes, 0);
-        ASSERT_GE(Spiller::pool()->stats().peakBytes, peakSpillMemoryUsage);
+      ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
+      if (memory::spillMemoryPool()->trackUsage()) {
+        ASSERT_GT(memory::spillMemoryPool()->stats().peakBytes, 0);
+        ASSERT_GE(
+            memory::spillMemoryPool()->stats().peakBytes, peakSpillMemoryUsage);
       }
     }
+  }
+}
+
+TEST_F(SortBufferTest, emptySpill) {
+  const std::shared_ptr<memory::MemoryPool> fuzzerPool =
+      memory::addDefaultLeafMemoryPool("emptySpillSource");
+
+  for (bool hasPostSpillData : {false, true}) {
+    SCOPED_TRACE(fmt::format("hasPostSpillData {}", hasPostSpillData));
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto filePath = makeOperatorSpillPath(spillDirectory->path, 0, 0, 0);
+    auto spillConfig = getSpillConfig(filePath);
+    auto sortBuffer = std::make_unique<SortBuffer>(
+        inputType_,
+        sortColumnIndices_,
+        sortCompareFlags_,
+        1000,
+        pool_.get(),
+        &nonReclaimableSection_,
+        &numSpillRuns_,
+        &spillConfig,
+        0);
+
+    sortBuffer->spill(0, 0);
+    if (hasPostSpillData) {
+      VectorFuzzer fuzzer({.vectorSize = 1024}, fuzzerPool.get());
+      sortBuffer->addInput(fuzzer.fuzzRow(inputType_));
+    }
+    sortBuffer->noMoreInput();
+    ASSERT_FALSE(sortBuffer->spilledStats());
   }
 }
 } // namespace facebook::velox::functions::test

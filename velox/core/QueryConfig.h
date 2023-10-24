@@ -18,6 +18,24 @@
 #include "velox/core/Config.h"
 
 namespace facebook::velox::core {
+enum class CapacityUnit {
+  BYTE,
+  KILOBYTE,
+  MEGABYTE,
+  GIGABYTE,
+  TERABYTE,
+  PETABYTE
+};
+
+double toBytesPerCapacityUnit(CapacityUnit unit);
+
+CapacityUnit valueOfCapacityUnit(const std::string& unitStr);
+
+/// Convert capacity string with unit to the capacity number in the specified
+/// units
+uint64_t toCapacity(const std::string& from, CapacityUnit to);
+
+std::chrono::duration<double> toDuration(const std::string& str);
 
 /// A simple wrapper around velox::Config. Defines constants for query
 /// config properties and accessor methods.
@@ -32,40 +50,45 @@ class QueryConfig {
 
   static constexpr const char* kCodegenEnabled = "codegen.enabled";
 
+  /// Maximum memory that a query can use on a single host.
+  static constexpr const char* kQueryMaxMemoryPerNode =
+      "query_max_memory_per_node";
+
   static constexpr const char* kCodegenConfigurationFilePath =
       "codegen.configuration_file_path";
 
   static constexpr const char* kCodegenLazyLoading = "codegen.lazy_loading";
 
-  // User provided session timezone. Stores a string with the actual timezone
-  // name, e.g: "America/Los_Angeles".
+  /// User provided session timezone. Stores a string with the actual timezone
+  /// name, e.g: "America/Los_Angeles".
   static constexpr const char* kSessionTimezone = "session_timezone";
 
-  // If true, timezone-less timestamp conversions (e.g. string to timestamp,
-  // when the string does not specify a timezone) will be adjusted to the user
-  // provided session timezone (if any).
-  //
-  // For instance:
-  //
-  //  if this option is true and user supplied "America/Los_Angeles",
-  //  "1970-01-01" will be converted to -28800 instead of 0.
-  //
-  // False by default.
+  /// If true, timezone-less timestamp conversions (e.g. string to timestamp,
+  /// when the string does not specify a timezone) will be adjusted to the user
+  /// provided session timezone (if any).
+  ///
+  /// For instance:
+  ///
+  ///  if this option is true and user supplied "America/Los_Angeles",
+  ///  "1970-01-01" will be converted to -28800 instead of 0.
+  ///
+  /// False by default.
   static constexpr const char* kAdjustTimestampToTimezone =
       "adjust_timestamp_to_session_timezone";
 
-  // Whether to use the simplified expression evaluation path. False by default.
+  /// Whether to use the simplified expression evaluation path. False by
+  /// default.
   static constexpr const char* kExprEvalSimplified =
       "expression.eval_simplified";
 
-  // Whether to track CPU usage for individual expressions (supported by call
-  // and cast expressions). False by default. Can be expensive when processing
-  // small batches, e.g. < 10K rows.
+  /// Whether to track CPU usage for individual expressions (supported by call
+  /// and cast expressions). False by default. Can be expensive when processing
+  /// small batches, e.g. < 10K rows.
   static constexpr const char* kExprTrackCpuUsage =
       "expression.track_cpu_usage";
 
-  // Whether to track CPU usage for stages of individual operators. True by
-  // default. Can be expensive when processing small batches, e.g. < 10K rows.
+  /// Whether to track CPU usage for stages of individual operators. True by
+  /// default. Can be expensive when processing small batches, e.g. < 10K rows.
   static constexpr const char* kOperatorTrackCpuUsage =
       "track_operator_cpu_usage";
 
@@ -139,6 +162,12 @@ class QueryConfig {
   /// output rows.
   static constexpr const char* kMaxOutputBatchRows = "max_output_batch_rows";
 
+  /// TableScan operator will exit getOutput() method after this many
+  /// milliseconds even if it has no data to return yet. Zero means 'no time
+  /// limit'.
+  static constexpr const char* kTableScanGetOutputTimeLimitMs =
+      "table_scan_getoutput_time_limit_ms";
+
   /// If false, the 'group by' code is forced to use generic hash mode
   /// hashtable.
   static constexpr const char* kHashAdaptivityEnabled =
@@ -161,6 +190,18 @@ class QueryConfig {
 
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
+
+  /// If true, the memory arbitrator will reclaim memory from table writer by
+  /// flushing its buffered data to disk.
+  static constexpr const char* kWriterSpillEnabled = "writer_spill_enabled";
+
+  /// RowNumber spilling flag, only applies if "spill_enabled" flag is set.
+  static constexpr const char* kRowNumberSpillEnabled =
+      "row_number_spill_enabled";
+
+  /// TopNRowNumber spilling flag, only applies if "spill_enabled" flag is set.
+  static constexpr const char* kTopNRowNumberSpillEnabled =
+      "topn_row_number_spill_enabled";
 
   /// The max memory that a final aggregation can use before spilling. If it 0,
   /// then there is no limit.
@@ -225,6 +266,9 @@ class QueryConfig {
   /// output processing stage.
   static constexpr const char* kAggregationSpillAll = "aggregation_spill_all";
 
+  static constexpr const char* kMinSpillableReservationPct =
+      "min_spillable_reservation_pct";
+
   static constexpr const char* kSpillableReservationGrowthPct =
       "spillable_reservation_growth_pct";
 
@@ -266,6 +310,27 @@ class QueryConfig {
   static constexpr const char* kMinTableRowsForParallelJoinBuild =
       "min_table_rows_for_parallel_join_build";
 
+  /// If set to true, then during execution of tasks, the output vectors of
+  /// every operator are validated for consistency. This is an expensive check
+  /// so should only be used for debugging. It can help debug issues where
+  /// malformed vector cause failures or crashes by helping identify which
+  /// operator is generating them.
+  static constexpr const char* kValidateOutputFromOperators =
+      "debug.validate_output_from_operators";
+
+  /// If true, enable caches in expression evaluation for performance, including
+  /// ExecCtx::vectorPool_, ExecCtx::decodedVectorPool_,
+  /// ExecCtx::selectivityVectorPool_, Expr::baseDictionary_,
+  /// Expr::dictionaryCache_, and Expr::cachedDictionaryIndices_. Otherwise,
+  /// disable the caches.
+  static constexpr const char* kEnableExpressionEvaluationCache =
+      "enable_expression_evaluation_cache";
+
+  uint64_t queryMaxMemoryPerNode() const {
+    return toCapacity(
+        get<std::string>(kQueryMaxMemoryPerNode, "0B"), CapacityUnit::BYTE);
+  }
+
   uint64_t maxPartialAggregationMemoryUsage() const {
     static constexpr uint64_t kDefault = 1L << 24;
     return get<uint64_t>(kMaxPartialAggregationMemory, kDefault);
@@ -302,7 +367,7 @@ class QueryConfig {
   // Returns the target size for a Task's buffered output. The
   // producer Drivers are blocked when the buffered size exceeds
   // this. The Drivers are resumed when the buffered size goes below
-  // PartitionedOutputBufferManager::kContinuePct % of this.
+  // OutputBufferManager::kContinuePct % of this.
   uint64_t maxPartitionedOutputBufferSize() const {
     static constexpr uint64_t kDefault = 32UL << 20;
     return get<uint64_t>(kMaxPartitionedOutputBufferSize, kDefault);
@@ -329,6 +394,10 @@ class QueryConfig {
 
   uint32_t maxOutputBatchRows() const {
     return get<uint32_t>(kMaxOutputBatchRows, 10'000);
+  }
+
+  uint32_t tableScanGetOutputTimeLimitMs() const {
+    return get<uint64_t>(kTableScanGetOutputTimeLimitMs, 5'000);
   }
 
   bool hashAdaptivityEnabled() const {
@@ -408,8 +477,26 @@ class QueryConfig {
     return get<bool>(kOrderBySpillEnabled, true);
   }
 
-  // Returns a percentage of aggregation or join input batches that
-  // will be forced to spill for testing. 0 means no extra spilling.
+  /// Returns 'is writer spilling enabled' flag. Must also check the
+  /// spillEnabled()!
+  bool writerSpillEnabled() const {
+    return get<bool>(kWriterSpillEnabled, true);
+  }
+
+  /// Returns true if spilling is enabled for RowNumber operator. Must also
+  /// check the spillEnabled()!
+  bool rowNumberSpillEnabled() const {
+    return get<bool>(kRowNumberSpillEnabled, true);
+  }
+
+  /// Returns true if spilling is enabled for TopNRowNumber operator. Must also
+  /// check the spillEnabled()!
+  bool topNRowNumberSpillEnabled() const {
+    return get<bool>(kTopNRowNumberSpillEnabled, true);
+  }
+
+  /// Returns a percentage of aggregation or join input batches that will be
+  /// forced to spill for testing. 0 means no extra spilling.
   int32_t testingSpillPct() const {
     return get<int32_t>(kTestingSpillPct, 0);
   }
@@ -452,7 +539,7 @@ class QueryConfig {
   }
 
   bool aggregationSpillAll() const {
-    return get<bool>(kAggregationSpillAll, false);
+    return get<bool>(kAggregationSpillAll, true);
   }
 
   uint64_t maxSpillFileSize() const {
@@ -474,13 +561,25 @@ class QueryConfig {
     return get<uint64_t>(kSpillWriteBufferSize, 1L << 20);
   }
 
+  /// Returns the minimal available spillable memory reservation in percentage
+  /// of the current memory usage. Suppose the current memory usage size of M,
+  /// available memory reservation size of N and min reservation percentage of
+  /// P, if M * P / 100 > N, then spiller operator needs to grow the memory
+  /// reservation with percentage of spillableReservationGrowthPct(). This
+  /// ensures we have sufficient amount of memory reservation to process the
+  /// large input outlier.
+  int32_t minSpillableReservationPct() const {
+    constexpr int32_t kDefaultPct = 5;
+    return get<int32_t>(kMinSpillableReservationPct, kDefaultPct);
+  }
+
   /// Returns the spillable memory reservation growth percentage of the previous
-  /// memory reservation size. 25 means exponential growth along a series of
-  /// integer powers of 5/4. The reservation grows by this much until it no
+  /// memory reservation size. 10 means exponential growth along a series of
+  /// integer powers of 11/10. The reservation grows by this much until it no
   /// longer can, after which it starts spilling.
   int32_t spillableReservationGrowthPct() const {
-    constexpr int32_t kDefaultPct = 25;
-    return get<double>(kSpillableReservationGrowthPct, kDefaultPct);
+    constexpr int32_t kDefaultPct = 10;
+    return get<int32_t>(kSpillableReservationGrowthPct, kDefaultPct);
   }
 
   bool sparkLegacySizeOfNull() const {
@@ -538,6 +637,14 @@ class QueryConfig {
 
   uint32_t minTableRowsForParallelJoinBuild() const {
     return get<uint32_t>(kMinTableRowsForParallelJoinBuild, 1'000);
+  }
+
+  bool validateOutputFromOperators() const {
+    return get<bool>(kValidateOutputFromOperators, false);
+  }
+
+  bool isExpressionEvaluationCacheEnabled() const {
+    return get<bool>(kEnableExpressionEvaluationCache, true);
   }
 
   template <typename T>

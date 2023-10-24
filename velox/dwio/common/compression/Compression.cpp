@@ -15,10 +15,8 @@
  */
 
 #include "velox/dwio/common/compression/Compression.h"
-
 #include "velox/common/compression/LzoDecompressor.h"
 #include "velox/dwio/common/compression/PagedInputStream.h"
-#include "velox/dwio/common/compression/PagedOutputStream.h"
 
 #include <folly/logging/xlog.h>
 #include <lz4.h>
@@ -241,16 +239,15 @@ uint64_t Lz4Decompressor::decompress(
   return static_cast<uint64_t>(result);
 }
 
+// NOTE: We do not keep `ZSTD_DCtx' around on purpose, because if we keep it
+// around, in flat map column reader we have hundreds of thousands of
+// decompressors at same time and causing OOM.
 class ZstdDecompressor : public Decompressor {
  public:
   explicit ZstdDecompressor(
       uint64_t blockSize,
       const std::string& streamDebugInfo)
-      : Decompressor{blockSize, streamDebugInfo}, context_{ZSTD_createDCtx()} {}
-
-  ~ZstdDecompressor() override {
-    ZSTD_freeDCtx(context_);
-  }
+      : Decompressor{blockSize, streamDebugInfo} {}
 
   uint64_t decompress(
       const char* src,
@@ -261,9 +258,6 @@ class ZstdDecompressor : public Decompressor {
   std::pair<int64_t, bool> getDecompressedLength(
       const char* src,
       uint64_t srcLength) const override;
-
- private:
-  ZSTD_DCtx* context_;
 };
 
 uint64_t ZstdDecompressor::decompress(
@@ -271,7 +265,7 @@ uint64_t ZstdDecompressor::decompress(
     uint64_t srcLength,
     char* dest,
     uint64_t destLength) {
-  auto ret = ZSTD_decompressDCtx(context_, dest, destLength, src, srcLength);
+  auto ret = ZSTD_decompress(dest, destLength, src, srcLength);
   DWIO_ENSURE(
       !ZSTD_isError(ret),
       "ZSTD returned an error: ",
@@ -465,36 +459,25 @@ bool ZlibDecompressionStream::readOrSkip(const void** data, int32_t* size) {
 
 } // namespace
 
-std::unique_ptr<BufferedOutputStream> createCompressor(
+std::unique_ptr<Compressor> createCompressor(
     CompressionKind kind,
-    CompressionBufferPool& bufferPool,
-    DataBufferHolder& bufferHolder,
-    uint8_t pageHeaderSize,
-    const CompressionOptions& options,
-    const Encrypter* encrypter) {
-  std::unique_ptr<Compressor> compressor;
+    const CompressionOptions& options) {
   switch (kind) {
     case CompressionKind::CompressionKind_NONE:
-      if (!encrypter) {
-        return std::make_unique<BufferedOutputStream>(bufferHolder);
-      }
-      // compressor remain as nullptr
-      break;
+      return nullptr;
     case CompressionKind::CompressionKind_ZLIB: {
-      compressor = std::make_unique<ZlibCompressor>(
-          options.format.zlib.compressionLevel);
       XLOG_FIRST_N(INFO, 1) << fmt::format(
           "Initialized zlib compressor with compression level {}",
           options.format.zlib.compressionLevel);
-      break;
+      return std::make_unique<ZlibCompressor>(
+          options.format.zlib.compressionLevel);
     }
     case CompressionKind::CompressionKind_ZSTD: {
-      compressor = std::make_unique<ZstdCompressor>(
-          options.format.zstd.compressionLevel);
       XLOG_FIRST_N(INFO, 1) << fmt::format(
           "Initialized zstd compressor with compression level {}",
           options.format.zstd.compressionLevel);
-      break;
+      return std::make_unique<ZstdCompressor>(
+          options.format.zstd.compressionLevel);
     }
     case CompressionKind::CompressionKind_SNAPPY:
     case CompressionKind::CompressionKind_LZO:
@@ -503,13 +486,7 @@ std::unique_ptr<BufferedOutputStream> createCompressor(
       VELOX_UNSUPPORTED(
           "Unsupported compression type: {}", compressionKindToString(kind));
   }
-  return std::make_unique<PagedOutputStream>(
-      bufferPool,
-      bufferHolder,
-      options.compressionThreshold,
-      pageHeaderSize,
-      std::move(compressor),
-      encrypter);
+  return nullptr;
 }
 
 std::unique_ptr<dwio::common::SeekableInputStream> createDecompressor(
