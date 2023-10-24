@@ -82,6 +82,12 @@ General Aggregate Functions
     each input value occurs. Supports integral, floating-point,
     boolean, timestamp, and date input types.
 
+.. function:: geometric_mean(x) -> double
+
+    Returns the `geometric mean <https://en.wikipedia.org/wiki/Geometric_mean>`_ of all input values.
+
+    Supported types are BIGINT and DOUBLE.
+
 .. function:: max_by(x, y) -> [same as x]
 
     Returns the value of ``x`` associated with the maximum value of ``y`` over all input values.
@@ -101,18 +107,22 @@ General Aggregate Functions
 .. function:: max(x) -> [same as input]
 
     Returns the maximum value of all input values.
+    ``x`` must not contains nulls when it is complex type.
 
 .. function:: max(x, n) -> array<[same as x]>
 
     Returns ``n`` largest values of all input values of ``x``.
+    ``n`` must be a positive integer and not exceed 10'000.
 
 .. function:: min(x) -> [same as input]
 
     Returns the minimum value of all input values.
+    ``x`` must not contains nulls when it is complex type.
 
 .. function:: min(x, n) -> array<[same as x]>
 
     Returns ``n`` smallest values of all input values of ``x``.
+    ``n`` must be a positive integer and not exceed 10'000.
 
 .. function:: multimap_agg(key, value) -> map(K,array(V))
 
@@ -213,6 +223,12 @@ Bitwise Aggregate Functions
 .. function:: bitwise_or_agg(x) -> bigint
 
     Returns the bitwise OR of all input values in 2's complement representation.
+
+.. function:: bitwise_xor_agg(x) -> [same as input]
+
+    Returns the bitwise XOR of all input values in 2's complement representation.
+
+    Supported types are TINYINT, SMALLINT, INTEGER and BIGINT.
 
 Map Aggregate Functions
 -----------------------

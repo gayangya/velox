@@ -285,7 +285,7 @@ TEST_F(MinMaxTest, array) {
   auto data = makeRowVector({
       makeNullableArrayVector<int64_t>({
           {1, 2, 3},
-          {std::nullopt, 2},
+          {2, std::nullopt},
           {6, 7, 8},
       }),
   });
@@ -317,7 +317,7 @@ TEST_F(MinMaxTest, map) {
   auto data = makeRowVector({
       makeNullableMapVector<int64_t, int64_t>({
           {{{1, 1}, {2, 2}}},
-          {{{1, 1}, {2, std::nullopt}}},
+          {{{2, std::nullopt}, {2, 3}}},
           {{{4, 50}}},
       }),
   });
@@ -345,17 +345,26 @@ TEST_F(MinMaxTest, map) {
 TEST_F(MinMaxTest, row) {
   auto data = makeRowVector({
       makeRowVector({
+          makeFlatVector<StringView>({
+              "a"_sv,
+              "b"_sv,
+              "c"_sv,
+          }),
           makeNullableFlatVector<StringView>({
-              "abc"_sv,
               std::nullopt,
               "efg"_sv,
+              "hij"_sv,
           }),
       }),
   });
 
   auto expected = makeRowVector({
-      makeRowVector({makeFlatVector<StringView>({"abc"_sv})}),
-      makeRowVector({makeFlatVector<StringView>({"efg"_sv})}),
+      makeRowVector(
+          {makeFlatVector<StringView>({"a"_sv}),
+           makeFlatVector<StringView>({"abc"_sv})}),
+      makeRowVector(
+          {makeFlatVector<StringView>({"c"_sv}),
+           makeFlatVector<StringView>({"hij"_sv})}),
   });
 
   VELOX_ASSERT_THROW(
@@ -364,15 +373,62 @@ TEST_F(MinMaxTest, row) {
 
   data = makeRowVector({
       makeRowVector({
+          makeFlatVector<StringView>({
+              "a"_sv,
+              "b"_sv,
+              "c"_sv,
+          }),
           makeNullableFlatVector<StringView>({
               "abc"_sv,
-              "ef"_sv,
               "efg"_sv,
+              "hij"_sv,
+          }),
+      }),
+  });
+  testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected});
+}
+
+TEST_F(MinMaxTest, arrayCheckNulls) {
+  auto data = makeRowVector({
+      makeNullableArrayVector<int64_t>({
+          {1, 2},
+          {2, std::nullopt},
+          {6, 7},
+      }),
+  });
+
+  for (const auto& expr : {"min(c0)", "max(c0)"}) {
+    auto plan =
+        PlanBuilder().values({data}).singleAggregation({}, {expr}).planNode();
+    VELOX_ASSERT_THROW(
+        AssertQueryBuilder(plan).copyResults(pool()),
+        "ARRAY comparison not supported for values that contain nulls");
+  }
+}
+
+TEST_F(MinMaxTest, rowCheckNull) {
+  auto data = makeRowVector({
+      makeRowVector({
+          makeFlatVector<StringView>({
+              "a"_sv,
+              "b"_sv,
+              "c"_sv,
+          }),
+          makeNullableFlatVector<StringView>({
+              "aa"_sv,
+              std::nullopt,
+              "cc"_sv,
           }),
       }),
   });
 
-  testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected});
+  for (const auto& expr : {"min(c0)", "max(c0)"}) {
+    auto plan =
+        PlanBuilder().values({data}).singleAggregation({}, {expr}).planNode();
+    VELOX_ASSERT_THROW(
+        AssertQueryBuilder(plan).copyResults(pool()),
+        "ROW comparison not supported for values that contain nulls");
+  }
 }
 
 class MinMaxNTest : public functions::aggregate::test::AggregationTestBase {
@@ -384,9 +440,8 @@ class MinMaxNTest : public functions::aggregate::test::AggregationTestBase {
 
   template <typename T>
   void testNumericGlobal() {
-    auto data = makeRowVector({
-        makeFlatVector<T>({1, 10, 2, 9, 3, 8, 4, 7, 6, 5}),
-    });
+    auto data =
+        makeRowVector({makeFlatVector<T>({1, 10, 2, 9, 3, 8, 4, 7, 6, 5})});
 
     // DuckDB doesn't support min(x, n) or max(x, n) functions.
 
@@ -452,6 +507,47 @@ class MinMaxNTest : public functions::aggregate::test::AggregationTestBase {
         {},
         {"min(c0, 2)", "min(c0, 5)", "max(c0, 3)", "max(c0, 7)"},
         {expected});
+
+    // Test the NULL handling in `N` param.
+    data = makeRowVector({
+        makeFlatVector<T>({1, 10, 2, 9, 3, 8, 4, 7, 6, 5}),
+        // c1, used as the N of minN, with NULL in it.
+        makeNullableFlatVector<int64_t>(
+            {2, 2, std::nullopt, 2, 2, 2, 2, 2, 2, 2}),
+        // c2, used as the N of maxN, with NULL in it.
+        makeNullableFlatVector<int64_t>(
+            {3, 3, 3, 3, 3, std::nullopt, 3, 3, 3, 3}),
+        // c3, used as the N of minN/maxN, all NULL.
+        makeAllNullFlatVector<int64_t>(10),
+    });
+
+    expected = makeRowVector(
+        // min(c0, c1): Because of NULL N, 2 is ignored.
+        {makeArrayVector<T>({
+             {1, 3},
+         }),
+         // min(c0, c3): Since all N are NULL, the result is NULL.
+         makeNullableArrayVector<T>({std::nullopt}),
+         // max(c0, c2): Because of NULL N, 8 is ignored.
+         makeArrayVector<T>({
+             {10, 9, 7},
+         }),
+         // max(c0, c3): Since all N are NULL, the result is NULL.
+         makeNullableArrayVector<T>({std::nullopt})});
+
+    testAggregations(
+        {data},
+        {},
+        {"min(c0, c1)", "min(c0, c3)", "max(c0, c2)", "max(c0, c3)"},
+        {expected});
+
+    // Second argument of max_n/min_n must be less than or equal to 10000.
+    VELOX_ASSERT_THROW(
+        testAggregations({data}, {}, {"min(c0, 10001)"}, {expected}),
+        "second argument of max/min must be less than or equal to 10000");
+    VELOX_ASSERT_THROW(
+        testAggregations({data}, {}, {"max(c0, 10001)"}, {expected}),
+        "second argument of max/min must be less than or equal to 10000");
   }
 
   template <typename T>
@@ -540,6 +636,46 @@ class MinMaxNTest : public functions::aggregate::test::AggregationTestBase {
         {data},
         {"c0"},
         {"min(c1, 2)", "min(c1, 5)", "max(c1, 3)", "max(c1, 7)"},
+        {expected});
+
+    // Test the NULL handling in `N` param.
+    data = makeRowVector({
+        // Group by column.
+        makeFlatVector<int16_t>({1, 2, 1, 1, 2, 2, 1, 2}),
+        // Values.
+        makeFlatVector<T>({1, 2, 4, 3, 6, 5, 7, 8}),
+        // c2: used as the N of min, with NULL in it.
+        makeNullableFlatVector<int64_t>(
+            {2, 2, 2, std::nullopt, 2, std::nullopt, 2, 2}),
+        // c3: used as the N of max, with NULL in it.
+        makeNullableFlatVector<int64_t>(
+            {3, 3, 3, 3, 3, 3, std::nullopt, std::nullopt}),
+        // c4: used as the N of minN/maxN, all NULL.
+        makeAllNullFlatVector<int64_t>(8),
+    });
+
+    expected = makeRowVector({
+        makeFlatVector<int16_t>({1, 2}),
+        // min(c1, c2): 3, 5 are ignored because of NULL N.
+        makeArrayVector<T>({
+            {1, 4},
+            {2, 6},
+        }),
+        // min(c1, c4): Since all N are NULL, the result is NULL.
+        makeNullableArrayVector<T>({std::nullopt, std::nullopt}),
+        // max(c1, c3): 7, 8 are ignored because of NULL N.
+        makeArrayVector<T>({
+            {4, 3, 1},
+            {6, 5, 2},
+        }),
+        // max(c1, c4): Since all N are NULL, the result is NULL.
+        makeNullableArrayVector<T>({std::nullopt, std::nullopt}),
+    });
+
+    testAggregations(
+        {data},
+        {"c0"},
+        {"min(c1, c2)", "min(c1, c4)", "max(c1, c3)", "max(c1, c4)"},
         {expected});
   }
 };

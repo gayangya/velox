@@ -188,6 +188,12 @@ Spilling
      - integer
      - 0
      - Maximum amount of memory in bytes that a final aggregation can use before spilling. 0 means unlimited.
+   * - aggregation_spill_all
+     - boolean
+     - false
+     - If true and spilling has been triggered during the input processing, the spiller will spill all the remaining
+     - in-memory state to disk before output processing. This is to simplify the aggregation query OOM prevention in
+     - output processing stage.
    * - join_spill_memory_threshold
      - integer
      - 0
@@ -316,7 +322,7 @@ Hive Connector
        the update mode field of the table writer operator output. ``OVERWRITE``
        sets the update mode to indicate overwriting a partition if exists. ``ERROR`` sets the update mode to indicate
        error throwing if writing to an existing partition.
-   * - immutable_partitions
+   * - hive.immutable-partitions
      - bool
      - false
      - True if appending data to an existing unpartitioned table is allowed. Currently this configuration does not
